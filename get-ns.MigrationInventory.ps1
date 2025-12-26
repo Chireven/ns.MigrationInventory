@@ -241,6 +241,46 @@ function Parse-RuleBetween {
   return ($line.Substring($si, $ei - $si).Trim())
 }
 
+function Get-ServerAddress {
+  param(
+    [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)][string]$serverName
+  )
+  if ($m.Server.ContainsKey($serverName)) { return $m.Server[$serverName] }
+  return "[NOT FOUND]"
+}
+
+function Get-BackendLookup {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $lbTargets = @{}
+  $sgMembers = @{}
+  $sgMonitors = @{}
+
+  foreach ($b in @($m.Bindings | Where-Object { $_.BindType -eq "lb-vserver->backend-target" })) {
+    if (-not $lbTargets.ContainsKey($b.TargetName)) { $lbTargets[$b.TargetName] = @() }
+    $lbTargets[$b.TargetName] += $b.PolicyName
+  }
+
+  foreach ($b in @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->member-server" })) {
+    if (-not $sgMembers.ContainsKey($b.TargetName)) { $sgMembers[$b.TargetName] = @() }
+    $port = ($b.Extra -replace '^port=', '')
+    $addr = Get-ServerAddress -m $m -serverName $b.PolicyName
+    $sgMembers[$b.TargetName] += ("{0} ({1}:{2})" -f $b.PolicyName, $addr, $port)
+  }
+
+  foreach ($b in @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->monitor" })) {
+    if (-not $sgMonitors.ContainsKey($b.TargetName)) { $sgMonitors[$b.TargetName] = @() }
+    $sgMonitors[$b.TargetName] += $b.PolicyName
+  }
+
+  return [pscustomobject]@{
+    LbTargets = $lbTargets
+    ServiceGroupMembers = $sgMembers
+    ServiceGroupMonitors = $sgMonitors
+  }
+}
+
 function Parse-NsConfigFile {
   param([Parameter(Mandatory=$true)][string]$FilePath)
 
@@ -513,12 +553,54 @@ function Get-CsFlows {
   param([Parameter(Mandatory=$true)]$m)
 
   $rows = @()
+  $backendLookup = Get-BackendLookup -m $m
 
   # direct CS policy binds
   $direct = @($m.Bindings | Where-Object { $_.BindType -eq "cs-vserver->cs-policy" })
   # label binds and label->policy binds
   $vsToLabel = @($m.Bindings | Where-Object { $_.BindType -eq "cs-vserver->cs-policylabel" })
   $labelToPol= @($m.Bindings | Where-Object { $_.BindType -eq "cs-policylabel->cs-policy" })
+
+  function Get-LbDetails($lbName) {
+    if (-not $lbName) {
+      return [pscustomobject]@{ Vip=""; Port=$null; Proto=""; Backends=@(); BackendDetails=@(); Members=@(); Monitors=@() }
+    }
+
+    $lbDef = if ($m.LbVserver.ContainsKey($lbName)) { $m.LbVserver[$lbName] } else { $null }
+    $targets = if ($backendLookup.LbTargets.ContainsKey($lbName)) { @($backendLookup.LbTargets[$lbName]) } else { @() }
+
+    $details = @()
+    $members = @()
+    $monitors = @()
+
+    foreach ($t in $targets) {
+      if ($m.ServiceGroup.ContainsKey($t)) {
+        $details += ("ServiceGroup {0} (proto={1})" -f $t, $m.ServiceGroup[$t].proto)
+        if ($backendLookup.ServiceGroupMembers.ContainsKey($t)) {
+          $members += @($backendLookup.ServiceGroupMembers[$t])
+        }
+        if ($backendLookup.ServiceGroupMonitors.ContainsKey($t)) {
+          $monitors += @($backendLookup.ServiceGroupMonitors[$t])
+        }
+      } elseif ($m.Service.ContainsKey($t)) {
+        $svc = $m.Service[$t]
+        $addr = Get-ServerAddress -m $m -serverName $svc.server
+        $details += ("Service {0} (server={1} addr={2} port={3} proto={4})" -f $t, $svc.server, $addr, $svc.port, $svc.proto)
+      } else {
+        $details += ("{0} [NOT FOUND]" -f $t)
+      }
+    }
+
+    return [pscustomobject]@{
+      Vip = if ($lbDef) { $lbDef.vip } else { "" }
+      Port = if ($lbDef) { $lbDef.port } else { $null }
+      Proto = if ($lbDef) { $lbDef.proto } else { "" }
+      Backends = $targets
+      BackendDetails = $details
+      Members = $members
+      Monitors = $monitors
+    }
+  }
 
   foreach ($b in $direct) {
     $pol = $b.PolicyName
@@ -527,15 +609,29 @@ function Get-CsFlows {
     $csActDef  = if ($csActName) { $m.CsAction[$csActName] } else { $null }
     $targetLb  = if ($csActDef) { $csActDef.targetLbVserver } else { "" }
     if ($targetLb) { Mark-Ref $m "UsedLbVserver" $targetLb }
+    $lbDetails = Get-LbDetails -lbName $targetLb
+    $csDef = if ($m.CsVserver.ContainsKey($b.TargetName)) { $m.CsVserver[$b.TargetName] } else { $null }
 
     $rows += [pscustomobject]@{
       CsVserver = $b.TargetName
+      CsVip    = if ($csDef) { $csDef.vip } else { "" }
+      CsPort   = if ($csDef) { $csDef.port } else { $null }
+      CsProto  = if ($csDef) { $csDef.proto } else { "" }
       Source   = "direct"
-      Priority = $b.Priority
+      PolicyLabel = ""
+      VserverPriority = $b.Priority
+      PolicyPriority = $null
       CsPolicy = $pol
       MatchRule= if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
       CsAction = if ($csActName) { $csActName } else { "[NOT FOUND]" }
       TargetLbVserver = if ($targetLb) { $targetLb } else { "" }
+      LbVip = $lbDetails.Vip
+      LbPort = $lbDetails.Port
+      LbProto = $lbDetails.Proto
+      LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+      LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+      LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+      LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
     }
   }
 
@@ -549,20 +645,34 @@ function Get-CsFlows {
       $csActDef  = if ($csActName) { $m.CsAction[$csActName] } else { $null }
       $targetLb  = if ($csActDef) { $csActDef.targetLbVserver } else { "" }
       if ($targetLb) { Mark-Ref $m "UsedLbVserver" $targetLb }
+      $lbDetails = Get-LbDetails -lbName $targetLb
+      $csDef = if ($m.CsVserver.ContainsKey($vb.TargetName)) { $m.CsVserver[$vb.TargetName] } else { $null }
 
       $rows += [pscustomobject]@{
         CsVserver = $vb.TargetName
-        Source   = ("label:{0}" -f $label)
-        Priority = ($lb.Priority) # label binding priority more meaningful than label attachment
+        CsVip    = if ($csDef) { $csDef.vip } else { "" }
+        CsPort   = if ($csDef) { $csDef.port } else { $null }
+        CsProto  = if ($csDef) { $csDef.proto } else { "" }
+        Source   = "label"
+        PolicyLabel = $label
+        VserverPriority = $vb.Priority
+        PolicyPriority = $lb.Priority
         CsPolicy = $pol
         MatchRule= if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
         CsAction = if ($csActName) { $csActName } else { "[NOT FOUND]" }
         TargetLbVserver = if ($targetLb) { $targetLb } else { "" }
+        LbVip = $lbDetails.Vip
+        LbPort = $lbDetails.Port
+        LbProto = $lbDetails.Proto
+        LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+        LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+        LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+        LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
       }
     }
   }
 
-  return @($rows | Sort-Object CsVserver, @{Expression="Priority"; Ascending=$true})
+  return @($rows | Sort-Object CsVserver, @{Expression="VserverPriority"; Ascending=$true}, @{Expression="PolicyPriority"; Ascending=$true})
 }
 
 function Get-ResponderTable {
@@ -627,46 +737,50 @@ function Get-BackendTable {
   param([Parameter(Mandatory=$true)]$m)
 
   $rows = @()
+  $backendLookup = Get-BackendLookup -m $m
 
-  $lbToBackend = @($m.Bindings | Where-Object { $_.BindType -eq "lb-vserver->backend-target" })
-  foreach ($b in $lbToBackend) {
-    $lb = $b.TargetName
-    $backend = $b.PolicyName
+  foreach ($lb in $backendLookup.LbTargets.Keys) {
+    foreach ($backend in @($backendLookup.LbTargets[$lb])) {
 
-    # is it a serviceGroup or a service?
-    $isSg = $m.ServiceGroup.ContainsKey($backend)
-    $isSvc= $m.Service.ContainsKey($backend)
+      # is it a serviceGroup or a service?
+      $isSg = $m.ServiceGroup.ContainsKey($backend)
+      $isSvc= $m.Service.ContainsKey($backend)
 
-    if ($isSg) { Mark-Ref $m "UsedServiceGroup" $backend }
-    if ($isSvc){ Mark-Ref $m "UsedService" $backend }
+      if ($isSg) { Mark-Ref $m "UsedServiceGroup" $backend }
+      if ($isSvc){ Mark-Ref $m "UsedService" $backend }
 
-    $rows += [pscustomobject]@{
-      LbVserver = $lb
-      BackendType = if ($isSg) { "Service Group" } elseif ($isSvc) { "Service" } else { "Unknown" }
-      BackendName = $backend
-      BackendDetails = if ($isSg) { ("proto={0}" -f $m.ServiceGroup[$backend].proto) }
-                       elseif ($isSvc) { ("server={0} port={1} proto={2}" -f $m.Service[$backend].server, $m.Service[$backend].port, $m.Service[$backend].proto) }
-                       else { "[NOT FOUND]" }
+      $details = if ($isSg) {
+        ("proto={0}" -f $m.ServiceGroup[$backend].proto)
+      } elseif ($isSvc) {
+        $svc = $m.Service[$backend]
+        $addr = Get-ServerAddress -m $m -serverName $svc.server
+        ("server={0} addr={1} port={2} proto={3}" -f $svc.server, $addr, $svc.port, $svc.proto)
+      } else {
+        "[NOT FOUND]"
+      }
+
+      $rows += [pscustomobject]@{
+        LbVserver = $lb
+        BackendType = if ($isSg) { "Service Group" } elseif ($isSvc) { "Service" } else { "Unknown" }
+        BackendName = $backend
+        BackendDetails = $details
+      }
     }
   }
 
   # expand serviceGroup members + monitors
-  $sgMembers = @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->member-server" })
-  $sgMons    = @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->monitor" })
-
   $expanded = @()
   foreach ($r in $rows) {
     if ($r.BackendType -ne "Service Group") { continue }
     $sg = $r.BackendName
 
-    $members = @($sgMembers | Where-Object { $_.TargetName -eq $sg })
-    $mons    = @($sgMons    | Where-Object { $_.TargetName -eq $sg })
-
-    $memberText = if ($members.Count -gt 0) {
-      ($members | ForEach-Object { "{0} ({1})" -f $_.PolicyName, $_.Extra }) -join ", "
+    $memberText = if ($backendLookup.ServiceGroupMembers.ContainsKey($sg)) {
+      @($backendLookup.ServiceGroupMembers[$sg]) -join ", "
     } else { "" }
 
-    $monText = if ($mons.Count -gt 0) { ($mons | ForEach-Object { $_.PolicyName }) -join ", " } else { "" }
+    $monText = if ($backendLookup.ServiceGroupMonitors.ContainsKey($sg)) {
+      @($backendLookup.ServiceGroupMonitors[$sg]) -join ", "
+    } else { "" }
 
     $expanded += [pscustomobject]@{
       LbVserver = $r.LbVserver
@@ -774,11 +888,16 @@ function Write-FlowDot {
     $polId= Id "csp" $r.CsPolicy
     $actId= Id "csa" $r.CsAction
     $lbId = if ($r.TargetLbVserver) { Id "lb" $r.TargetLbVserver } else { $null }
+    $prioLabel = if ($r.Source -eq "label") {
+      "vs={0},pol={1}" -f $r.VserverPriority, $r.PolicyPriority
+    } else {
+      "prio={0}" -f $r.VserverPriority
+    }
 
     Node $vsId ("CS vServer`n{0}" -f $r.CsVserver)
     Node $polId ("CS Policy`n{0}" -f $r.CsPolicy)
     Node $actId ("CS Action`n{0}" -f $r.CsAction)
-    Edge $vsId $polId ("prio={0}" -f ($r.Priority))
+    Edge $vsId $polId $prioLabel
     Edge $polId $actId "action"
 
     if ($lbId) {
@@ -844,7 +963,13 @@ function Write-Report {
   }
   foreach ($k in $m.LbVserver.Keys) {
     $o = $m.LbVserver[$k]
-    $entrypoints += [pscustomobject]@{ Type="LB vServer"; Name=$k; Address=("{0}:{1}" -f $o.vip, $o.port); Proto=$o.proto }
+    $entrypoints += [pscustomobject]@{
+      Type="LB vServer"
+      Name=$k
+      Address=("{0}:{1}" -f $o.vip, $o.port)
+      Proto=$o.proto
+      ReferencedByCS = if ($m.Refs.UsedLbVserver.ContainsKey($k)) { "Yes" } else { "No" }
+    }
   }
 
   $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" } | Sort-Object Priority, PolicyName)
@@ -853,6 +978,22 @@ function Write-Report {
   $flowLink = ""
   if ($flowGraphic) { $flowLink = "<p><b>Flow graphic:</b> <a href=""$flowGraphic"">$([IO.Path]::GetFileName($flowGraphic))</a></p>" }
   elseif ($flowDot) { $flowLink = "<p><b>Flow DOT:</b> <a href=""$flowDot"">$([IO.Path]::GetFileName($flowDot))</a></p>" }
+
+  $missingDefs = @($strays | Where-Object { $_.Reason -like "Referenced but not defined*" })
+  $unusedDefs  = @($strays | Where-Object { $_.Reason -like "Defined but not *" })
+  $missingActions = @($strays | Where-Object { $_.Type -like "*Action" -and $_.Reason -like "Referenced but not defined*" })
+
+  $summary = [pscustomobject]@{
+    Entrypoints = @($entrypoints).Count
+    CsFlows = @($csFlows).Count
+    ResponderBindings = @($respTable).Count
+    RewriteBindings = @($rwTable).Count
+    LbBackends = @($backend.LbToBackend).Count
+    StrayArtifacts = @($strays).Count
+    MissingDefinitions = @($missingDefs).Count
+    UnusedDefinitions = @($unusedDefs).Count
+    MissingActions = @($missingActions).Count
+  }
 
   $html = @"
 <!doctype html>
@@ -885,6 +1026,10 @@ function Write-Report {
       <li>Review <b>Stray Artifacts</b> to clean up or confirm intent before migrating.</li>
     </ul>
   </div>
+
+  <h2>Migration Summary</h2>
+  <p class="small">Use this section to quickly spot scope and potential cleanup needs.</p>
+  $((@($summary) | ConvertTo-Html -Fragment))
 
   <h2>Entry Points</h2>
   $((@($entrypoints) | Sort-Object Type, Name | ConvertTo-Html -Fragment))
