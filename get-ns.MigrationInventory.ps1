@@ -1637,12 +1637,12 @@ function Write-Report {
         });
         const meta = table.closest('.table-block')?.querySelector('.table-meta');
         if (meta) {
-          meta.textContent = term ? `Showing ${visibleRows} of ${rows.length} rows` : `${rows.length} rows`;
+          meta.textContent = term ? `Showing ``${visibleRows} of ``${rows.length} rows` : ``${rows.length} rows`;
         }
         totalMatches += visibleRows;
       });
       if (filterCount) {
-        filterCount.textContent = term ? `Matches: ${totalMatches}` : '';
+        filterCount.textContent = term ? `Matches: ``${totalMatches}` : '';
       }
     }
 
