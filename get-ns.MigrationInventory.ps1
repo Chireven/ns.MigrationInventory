@@ -1157,16 +1157,17 @@ function Write-Report {
     [Parameter(Mandatory=$true)]$backend,
     [Parameter(Mandatory=$true)]$strays,
     $entrypoints,
-    $entrypointFlows,
+    $entrypointFlowItems,
     [string]$flowDot,
-    [string]$flowGraphic
+    [string]$flowGraphic,
+    [string]$flowDotContent
   )
 
   Ensure-Dir $dir
   if (-not $reportTitle) { $reportTitle = $baseName }
   if (-not $reportFileName) { $reportFileName = $baseName + ".html" }
   if ($null -eq $entrypoints) { $entrypoints = @() }
-  if ($null -eq $entrypointFlows) { $entrypointFlows = @{} }
+  if ($null -eq $entrypointFlowItems) { $entrypointFlowItems = @() }
 
   $htmlPath = Join-Path $dir $reportFileName
   $csCsv    = Join-Path $dir ($baseName + ".csflows.csv")
@@ -1186,9 +1187,14 @@ function Write-Report {
   $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" } | Sort-Object Priority, PolicyName)
   $globRw   = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Rewrite" } | Sort-Object Priority, PolicyName)
 
+  $flowGraphicName = if ($flowGraphic) { [IO.Path]::GetFileName($flowGraphic) } else { $null }
+  $flowDotName = if ($flowDot) { [IO.Path]::GetFileName($flowDot) } else { $null }
   $flowLink = ""
-  if ($flowGraphic) { $flowLink = "<p><b>Flow graphic:</b> <a href=""$flowGraphic"">$([IO.Path]::GetFileName($flowGraphic))</a></p>" }
-  elseif ($flowDot) { $flowLink = "<p><b>Flow DOT:</b> <a href=""$flowDot"">$([IO.Path]::GetFileName($flowDot))</a></p>" }
+  if ($flowGraphicName) {
+    $flowLink = "<p><b>Flow graphic:</b> <a class=""badge-link"" href=""$flowGraphicName"" data-viewer=""image"" data-file=""$flowGraphicName"">View Diagram</a></p>"
+  } elseif ($flowDotName) {
+    $flowLink = "<p><b>Flow DOT:</b> <a class=""badge-link"" href=""#dot-overall-flow"">View DOT</a></p>"
+  }
 
   $missingDefs = @($strays | Where-Object { $_.Reason -like "Referenced but not defined*" })
   $unusedDefs  = @($strays | Where-Object { $_.Reason -like "Defined but not *" })
@@ -1224,9 +1230,21 @@ function Write-Report {
 
   $entrypointRows = @($entrypoints | Sort-Object Type, Name)
   $entrypointLinks = @($entrypoints | Sort-Object Type, Name | ForEach-Object {
-    $key = "{0}::{1}" -f $_.Type, $_.Name
-    $diagram = if ($entrypointFlows.ContainsKey($key)) { $entrypointFlows[$key] } else { "" }
-    if ($diagram) { "<li><a href=""$diagram"">$($_.Type) - $($_.Name)</a></li>" }
+    $ep = $_
+    $flowItem = @($entrypointFlowItems | Where-Object { $_.Type -eq $ep.Type -and $_.Name -eq $ep.Name } | Select-Object -First 1)
+    if ($flowItem) {
+      if ($flowItem.IsImage) {
+        "<li><span>$($ep.Type) - $($ep.Name)</span> <a class=""badge-link"" href=""$($flowItem.FileName)"" data-viewer=""image"" data-file=""$($flowItem.FileName)"">View Diagram</a> <a class=""badge-link"" href=""#$($flowItem.DotId)"">View DOT</a></li>"
+      } else {
+        "<li><span>$($ep.Type) - $($ep.Name)</span> <a class=""badge-link"" href=""#$($flowItem.DotId)"">View DOT</a></li>"
+      }
+    }
+  })
+
+  $flowDotEncoded = if ($flowDotContent) { [System.Net.WebUtility]::HtmlEncode($flowDotContent) } else { "" }
+  $entrypointDotBlocks = @($entrypointFlowItems | ForEach-Object {
+    $encoded = [System.Net.WebUtility]::HtmlEncode($_.DotContent)
+    "<details id=""$($_.DotId)""><summary>Entry Point DOT: $($_.Type) - $($_.Name)</summary><pre>$encoded</pre></details>"
   })
 
   $html = @"
@@ -1258,6 +1276,17 @@ function Write-Report {
     .bar { background: #e9edf2; border-radius: 10px; height: 10px; overflow: hidden; }
     .bar-fill { height: 10px; background: linear-gradient(90deg, #2d7dd2, #74b9ff); }
     .links a { margin-right: 12px; }
+    .badge-link { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #2d7dd2; color: #fff; border-radius: 999px; font-size: 12px; font-weight: 600; text-decoration: none; }
+    .badge-link:hover { background: #1f5ea8; }
+    .badge-link:focus { outline: 2px solid #0a4ea3; outline-offset: 2px; }
+    #image-viewer { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.7); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 24px; }
+    #image-viewer.open { display: flex; }
+    #image-viewer .viewer-card { background: #fff; border-radius: 12px; max-width: 96vw; max-height: 92vh; width: min(1100px, 96vw); display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+    #image-viewer header { background: #0f2c4d; color: #fff; padding: 10px 16px; border-radius: 12px 12px 0 0; display: flex; align-items: center; justify-content: space-between; }
+    #image-viewer header button { background: transparent; border: none; color: #fff; font-size: 18px; cursor: pointer; }
+    #image-viewer .viewer-body { padding: 16px; overflow: auto; background: #f8fafc; }
+    #image-viewer img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    pre { white-space: pre-wrap; background: #f8fafc; border: 1px solid #e4e7eb; border-radius: 8px; padding: 12px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -1312,6 +1341,16 @@ function Write-Report {
   </section>
 
   <section>
+    <h2>DOT Diagrams (Embedded)</h2>
+    <p class="small">DOT content is embedded below to keep the report self-contained.</p>
+    <details id="dot-overall-flow">
+      <summary>Overall Flow DOT</summary>
+      <pre>$flowDotEncoded</pre>
+    </details>
+    $($entrypointDotBlocks -join "`r`n")
+  </section>
+
+  <section>
     <h2>CS Routing Flows (CS vServer → Policy → Action → Target LB vServer)</h2>
     <p class="small">This is the core “where does traffic go?” view.</p>
     $((@($csFlows) | ConvertTo-Html -Fragment))
@@ -1347,17 +1386,57 @@ function Write-Report {
 
   <section>
     <h2>Downloads</h2>
-    <ul>
-      <li><a href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a></li>
-      <li><a href="$([IO.Path]::GetFileName($respCsv))">$([IO.Path]::GetFileName($respCsv))</a></li>
-      <li><a href="$([IO.Path]::GetFileName($rwCsv))">$([IO.Path]::GetFileName($rwCsv))</a></li>
-      <li><a href="$([IO.Path]::GetFileName($lbCsv))">$([IO.Path]::GetFileName($lbCsv))</a></li>
-      <li><a href="$([IO.Path]::GetFileName($sgCsv))">$([IO.Path]::GetFileName($sgCsv))</a></li>
-      <li><a href="$([IO.Path]::GetFileName($strayCsv))">$([IO.Path]::GetFileName($strayCsv))</a></li>
-    </ul>
+    <div class="links">
+      <a class="badge-link" href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a>
+      <a class="badge-link" href="$([IO.Path]::GetFileName($respCsv))">$([IO.Path]::GetFileName($respCsv))</a>
+      <a class="badge-link" href="$([IO.Path]::GetFileName($rwCsv))">$([IO.Path]::GetFileName($rwCsv))</a>
+      <a class="badge-link" href="$([IO.Path]::GetFileName($lbCsv))">$([IO.Path]::GetFileName($lbCsv))</a>
+      <a class="badge-link" href="$([IO.Path]::GetFileName($sgCsv))">$([IO.Path]::GetFileName($sgCsv))</a>
+      <a class="badge-link" href="$([IO.Path]::GetFileName($strayCsv))">$([IO.Path]::GetFileName($strayCsv))</a>
+    </div>
   </section>
 
   </main>
+
+  <div id="image-viewer" role="dialog" aria-modal="true" aria-label="Diagram viewer">
+    <div class="viewer-card">
+      <header>
+        <strong id="viewer-title">Diagram</strong>
+        <button type="button" id="viewer-close" aria-label="Close">✕</button>
+      </header>
+      <div class="viewer-body">
+        <img id="viewer-image" alt="Diagram preview">
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const viewer = document.getElementById('image-viewer');
+    const viewerImage = document.getElementById('viewer-image');
+    const viewerTitle = document.getElementById('viewer-title');
+    const viewerClose = document.getElementById('viewer-close');
+
+    function closeViewer() {
+      viewer.classList.remove('open');
+      viewerImage.src = '';
+      viewerTitle.textContent = 'Diagram';
+    }
+
+    document.querySelectorAll('a[data-viewer="image"]').forEach(link => {
+      link.addEventListener('click', event => {
+        event.preventDefault();
+        const file = link.getAttribute('data-file') || link.getAttribute('href');
+        viewerImage.src = file;
+        viewerTitle.textContent = file;
+        viewer.classList.add('open');
+      });
+    });
+
+    viewerClose.addEventListener('click', closeViewer);
+    viewer.addEventListener('click', event => {
+      if (event.target === viewer) { closeViewer(); }
+    });
+  </script>
 </body>
 </html>
 "@
@@ -1420,7 +1499,8 @@ foreach ($m in $models) {
     if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
   }
 
-  $report = Write-Report -m $m -baseName $name -dir $dir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -flowDot $flowDot -flowGraphic $flowGraphic
+  $flowDotContent = if ($flowDot -and (Test-Path -LiteralPath $flowDot)) { Get-Content -LiteralPath $flowDot -Raw } else { "" }
+  $report = Write-Report -m $m -baseName $name -dir $dir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -flowDot $flowDot -flowGraphic $flowGraphic -flowDotContent $flowDotContent
 
   $indexRows += [pscustomobject]@{
     File       = $m.File
@@ -1455,7 +1535,7 @@ $strays = $straysC
 $entrypoints = Get-EntryPoints -m $cm
 if ($null -eq $entrypoints) { $entrypoints = @() }
 
-$entrypointFlows = @{}
+$entrypointFlowItems = @()
 foreach ($ep in @($entrypoints)) {
   $safeName = Get-SafeFileName -Name ("{0}_{1}" -f $ep.Type, $ep.Name)
   $entryBase = $safeName
@@ -1465,7 +1545,27 @@ foreach ($ep in @($entrypoints)) {
     $epGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $epDot -Format $GraphFormat
     if (-not $epGraphic) { $renderWarn += "Render failed: $epDot" }
   }
-  $entrypointFlows["{0}::{1}" -f $ep.Type, $ep.Name] = if ($epGraphic) { [IO.Path]::GetFileName($epGraphic) } else { [IO.Path]::GetFileName($epDot) }
+  $dotId = "dot-entrypoint-{0}" -f (Get-SafeFileName -Name $entryBase)
+  $dotContent = if ($epDot -and (Test-Path -LiteralPath $epDot)) { Get-Content -LiteralPath $epDot -Raw } else { "" }
+  if ($epGraphic) {
+    $entrypointFlowItems += [pscustomobject]@{
+      Type = $ep.Type
+      Name = $ep.Name
+      IsImage = $true
+      FileName = [IO.Path]::GetFileName($epGraphic)
+      DotId = $dotId
+      DotContent = $dotContent
+    }
+  } else {
+    $entrypointFlowItems += [pscustomobject]@{
+      Type = $ep.Type
+      Name = $ep.Name
+      IsImage = $false
+      FileName = [IO.Path]::GetFileName($epDot)
+      DotId = $dotId
+      DotContent = $dotContent
+    }
+  }
 }
 
 $flowBase = "{0}_Flow" -f (Get-SafeFileName -Name $reportBaseName)
@@ -1477,9 +1577,10 @@ if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
 }
 $flowGraphicName = if ($flowGraphic) { [IO.Path]::GetFileName($flowGraphic) } else { $null }
 $flowDotName = [IO.Path]::GetFileName($flowDot)
+$flowDotContent = if ($flowDot -and (Test-Path -LiteralPath $flowDot)) { Get-Content -LiteralPath $flowDot -Raw } else { "" }
 
 $reportFileName = "{0}_ConfigurationReport.html" -f $reportBaseName
-$report = Write-Report -m $m -reportTitle $VPXName -baseName $reportBaseName -reportFileName $reportFileName -dir $reportDir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -entrypoints $entrypoints -entrypointFlows $entrypointFlows -flowDot $flowDotName -flowGraphic $flowGraphicName
+$report = Write-Report -m $m -reportTitle $VPXName -baseName $reportBaseName -reportFileName $reportFileName -dir $reportDir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -entrypoints $entrypoints -entrypointFlowItems $entrypointFlowItems -flowDot $flowDotName -flowGraphic $flowGraphicName -flowDotContent $flowDotContent
 
 if (@($renderWarn).Count -gt 0) {
   Write-Warning ("Graph render warnings:`r`n" + ($renderWarn -join "`r`n"))
