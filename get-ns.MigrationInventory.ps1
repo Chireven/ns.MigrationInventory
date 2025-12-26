@@ -802,10 +802,10 @@ function Get-BackendTable {
 function Get-StrayArtifacts {
   param([Parameter(Mandatory=$true)]$m)
 
-  $items = @()
+  $items = New-Object 'System.Collections.Generic.List[object]'
 
   function Add-Stray($type, $name, $reason) {
-    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+    $null = $items.Add([pscustomobject]@{ Type=$type; Name=$name; Reason=$reason })
   }
 
   # Defined but not used
@@ -1116,10 +1116,15 @@ foreach ($m in $models) {
   Ensure-Dir $dir
 
   $csFlows   = Get-CsFlows -m $m
+  if ($null -eq $csFlows) { $csFlows = @() }
   $respTable = Get-ResponderTable -m $m
+  if ($null -eq $respTable) { $respTable = @() }
   $rwTable   = Get-RewriteTable -m $m
+  if ($null -eq $rwTable) { $rwTable = @() }
   $backend   = Get-BackendTable -m $m
+  if ($null -eq $backend) { $backend = @() }
   $strays    = Get-StrayArtifacts -m $m
+  if ($null -eq $strays) { $strays = @() }
 
   $flowDot = Write-FlowDot -m $m -baseName $name -dir $dir -csFlows $csFlows
   $flowGraphic = $null
@@ -1186,10 +1191,15 @@ foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.Contai
 
 $combinedName = "ALL"
 $csFlowsC   = Get-CsFlows -m $cm
+if ($null -eq $csFlowsC) { $csFlowsC = @() }
 $respTableC = Get-ResponderTable -m $cm
+if ($null -eq $respTableC) { $respTableC = @() }
 $rwTableC   = Get-RewriteTable -m $cm
+if ($null -eq $rwTableC) { $rwTableC = @() }
 $backendC   = Get-BackendTable -m $cm
+if ($null -eq $backendC) { $backendC = @() }
 $straysC    = Get-StrayArtifacts -m $cm
+if ($null -eq $straysC) { $straysC = @() }
 $flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
 $flowGraphicC = $null
 
