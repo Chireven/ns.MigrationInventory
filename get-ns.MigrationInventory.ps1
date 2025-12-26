@@ -513,6 +513,7 @@ function Parse-NsConfigFile {
     if ($l -match '^\s*bind\s+(?<kind>\S+)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
       $priority = $null
       if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $polName = $Matches.pol
       $kindLabel = switch ($Matches.kind.ToLower()) {
         "cs" { "CS vServer" }
         "lb" { "LB vServer" }
@@ -1368,6 +1369,18 @@ $reportBaseName = $VPXName
 $reportDir = Join-Path $OutDir $VPXName
 Ensure-Dir $reportDir
 
+$models = @()
+$models += Parse-NsConfigFile -FilePath $ConfigFile
+if (@($models).Count -eq 0) {
+  throw "No configuration models were parsed from $ConfigFile."
+}
+$cm = $models[0]
+$perFileDir = Join-Path $reportDir "PerFile"
+$combinedDir = Join-Path $reportDir "Combined"
+Ensure-Dir $perFileDir
+Ensure-Dir $combinedDir
+$indexRows = @()
+
 $dotExe = Find-DotExe -override $DotExePath
 $renderWarn = @()
 
@@ -1383,7 +1396,7 @@ foreach ($m in $models) {
   $rwTable   = Get-RewriteTable -m $m
   if ($null -eq $rwTable) { $rwTable = @() }
   $backend   = Get-BackendTable -m $m
-  if ($null -eq $backend) { $backend = @() }
+  if ($null -eq $backend) { $backend = [pscustomobject]@{ LbToBackend=@(); ServiceGroupExpansion=@() } }
   $strays    = Get-StrayArtifacts -m $m
   if ($null -eq $strays) { $strays = @() }
 
@@ -1403,9 +1416,31 @@ foreach ($m in $models) {
     Flow       = if ($flowGraphic) { $flowGraphic } else { $flowDot }
   }
 }
-$strays    = Get-StrayArtifacts -m $m
-if ($null -eq $strays) { $strays = @() }
-$entrypoints = Get-EntryPoints -m $m
+foreach ($p in $cm.CsPolicy.Keys)        { if ($cm.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedCsAction" $cm.CsPolicy[$p].action } }
+foreach ($p in $cm.ResponderPolicy.Keys) { if ($cm.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedResponderAction" $cm.ResponderPolicy[$p].action } }
+foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $cm "UsedRewriteAction" $cm.RewritePolicy[$p].action } }
+
+$combinedName = "ALL"
+$csFlowsC   = Get-CsFlows -m $cm
+if ($null -eq $csFlowsC) { $csFlowsC = @() }
+$respTableC = Get-ResponderTable -m $cm
+if ($null -eq $respTableC) { $respTableC = @() }
+$rwTableC   = Get-RewriteTable -m $cm
+if ($null -eq $rwTableC) { $rwTableC = @() }
+$backendC   = Get-BackendTable -m $cm
+if ($null -eq $backendC) { $backendC = [pscustomobject]@{ LbToBackend=@(); ServiceGroupExpansion=@() } }
+$straysC    = Get-StrayArtifacts -m $cm
+if ($null -eq $straysC) { $straysC = @() }
+$flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
+$flowGraphicC = $null
+
+$m = $cm
+$csFlows = $csFlowsC
+$respTable = $respTableC
+$rwTable = $rwTableC
+$backend = $backendC
+$strays = $straysC
+$entrypoints = Get-EntryPoints -m $cm
 if ($null -eq $entrypoints) { $entrypoints = @() }
 
 $entrypointFlows = @{}
@@ -1420,23 +1455,6 @@ foreach ($ep in @($entrypoints)) {
   }
   $entrypointFlows["{0}::{1}" -f $ep.Type, $ep.Name] = if ($epGraphic) { [IO.Path]::GetFileName($epGraphic) } else { [IO.Path]::GetFileName($epDot) }
 }
-foreach ($p in $cm.CsPolicy.Keys)        { if ($cm.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedCsAction" $cm.CsPolicy[$p].action } }
-foreach ($p in $cm.ResponderPolicy.Keys) { if ($cm.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedResponderAction" $cm.ResponderPolicy[$p].action } }
-foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $cm "UsedRewriteAction" $cm.RewritePolicy[$p].action } }
-
-$combinedName = "ALL"
-$csFlowsC   = Get-CsFlows -m $cm
-if ($null -eq $csFlowsC) { $csFlowsC = @() }
-$respTableC = Get-ResponderTable -m $cm
-if ($null -eq $respTableC) { $respTableC = @() }
-$rwTableC   = Get-RewriteTable -m $cm
-if ($null -eq $rwTableC) { $rwTableC = @() }
-$backendC   = Get-BackendTable -m $cm
-if ($null -eq $backendC) { $backendC = @() }
-$straysC    = Get-StrayArtifacts -m $cm
-if ($null -eq $straysC) { $straysC = @() }
-$flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
-$flowGraphicC = $null
 
 $flowBase = "{0}_Flow" -f (Get-SafeFileName -Name $reportBaseName)
 $flowDot = Write-FullFlowDot -m $m -baseName $flowBase -dir $reportDir -csFlows $csFlows
