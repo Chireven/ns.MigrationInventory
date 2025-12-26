@@ -1017,6 +1017,7 @@ function Write-EntryPointFlowDot {
 function Write-FullFlowDot {
   param(
     [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)]$entrypoint,
     [Parameter(Mandatory=$true)][string]$baseName,
     [Parameter(Mandatory=$true)][string]$dir,
     [Parameter(Mandatory=$true)]$csFlows
@@ -1151,6 +1152,8 @@ function Write-Report {
   )
 
   Ensure-Dir $dir
+  if ($null -eq $entrypoints) { $entrypoints = @() }
+  if ($null -eq $entrypointFlows) { $entrypointFlows = @{} }
 
   $htmlPath = Join-Path $dir $reportFileName
   $csCsv    = Join-Path $dir ($baseName + ".csflows.csv")
