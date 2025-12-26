@@ -485,13 +485,17 @@ function Parse-NsConfigFile {
       continue
     }
 
-    # responder bound to CS/LB vServer (type=RESPONSE)
-    if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+    # responder bound to vServer (type=RESPONSE)
+    if ($l -match '^\s*bind\s+(?<kind>\S+)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
       $priority = $null
       if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
-      $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
+      $kindLabel = switch ($Matches.kind.ToLower()) {
+        "cs" { "CS vServer" }
+        "lb" { "LB vServer" }
+        default { "{0} vServer" -f $Matches.kind.ToUpper() }
+      }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
+        TargetType=$kindLabel; TargetName=$Matches.vs
         Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
         BindType="responder->policy"; Extra=$l
       }
