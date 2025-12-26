@@ -21,8 +21,11 @@
   - Regex parser of common NetScaler CLI config lines.
   - Works best on full exported configs (ns.conf + included confs).
 
-.PARAMETER ConfigFiles
-  One or more config file paths.
+.PARAMETER ConfigFile
+  Single config file path.
+
+.PARAMETER VPXName
+  Name used for report title and output folder naming.
 
 .PARAMETER OutDir
   Output directory.
@@ -37,14 +40,18 @@
   Skip SVG/PNG rendering even if dot.exe exists.
 
 .EXAMPLE
-  .\get-nsMigrationOverview.ps1 -ConfigFiles "C:\repo\ns\*.conf" -OutDir "C:\temp\ns\report" -GraphFormat svg
+  .\get-nsMigrationOverview.ps1 -ConfigFile "C:\repo\ns\ns.conf" -VPXName "VPX-Prod-01" -OutDir "C:\temp\ns\report" -GraphFormat svg
 #>
 
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)]
   [ValidateNotNullOrEmpty()]
-  [string[]]$ConfigFiles,
+  [string]$ConfigFile,
+
+  [Parameter(Mandatory=$true)]
+  [ValidateNotNullOrEmpty()]
+  [string]$VPXName,
 
   [Parameter(Mandatory=$false)]
   [ValidateNotNullOrEmpty()]
@@ -88,6 +95,14 @@ function Out-FileUtf8NoBom {
   }
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
+function Get-SafeFileName {
+  param([Parameter(Mandatory=$true)][string]$Name)
+  $invalid = [System.IO.Path]::GetInvalidFileNameChars()
+  $safe = $Name
+  foreach ($c in $invalid) { $safe = $safe.Replace($c, "_") }
+  return ($safe -replace '\s+', '_')
 }
 
 function Find-DotExe {
@@ -386,41 +401,50 @@ function Parse-NsConfigFile {
 
     # CS vServer binds CS policy
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-vserver->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
     # CS vServer binds policyLabel
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyLabel\s+(?<pl>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $labelName = $Matches['pl']
+      if (-not $vsName -or -not $labelName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pl; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$labelName; Priority=$priority
         BindType="cs-vserver->cs-policylabel"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
       continue
     }
 
     # CS policyLabel binds CS policy
     if ($l -match '^\s*bind\s+cs\s+policylabel\s+(?<pl>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $labelName = $Matches['pl']
+      $polName = $Matches['pol']
+      if (-not $labelName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS Policy Label"; TargetName=$Matches.pl
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS Policy Label"; TargetName=$labelName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-policylabel->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
@@ -485,17 +509,25 @@ function Parse-NsConfigFile {
       continue
     }
 
-    # responder bound to CS/LB vServer (type=RESPONSE)
-    if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+    # responder bound to vServer (type=RESPONSE)
+    if ($l -match '^\s*bind\s+(?<kind>\S+)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $kind = $Matches['kind']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $kind -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
-      $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $kindLabel = switch ($kind.ToLower()) {
+        "cs" { "CS vServer" }
+        "lb" { "LB vServer" }
+        default { "{0} vServer" -f $kind.ToUpper() }
+      }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
-        Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType=$kindLabel; TargetName=$vsName
+        Feature="Responder"; PolicyName=$polName; Priority=$priority
         BindType="responder->policy"; Extra=$l
       }
-      Mark-Ref $m "UsedResponderPolicy" $Matches.pol
+      Mark-Ref $m "UsedResponderPolicy" $polName
       continue
     }
 
@@ -514,26 +546,32 @@ function Parse-NsConfigFile {
 
     # rewrite bound to CS/LB vServer (type=REQUEST/RESPONSE)
     if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+(?<rtype>REQUEST|RESPONSE)\b(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
-        Feature="Rewrite"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType=$t; TargetName=$vsName
+        Feature="Rewrite"; PolicyName=$polName; Priority=$priority
         BindType=("rewrite-{0}->policy" -f $Matches.rtype.ToLower()); Extra=$l
       }
-      Mark-Ref $m "UsedRewritePolicy" $Matches.pol
+      Mark-Ref $m "UsedRewritePolicy" $polName
       continue
     }
 
     # SSL vServer cert binding (best-effort)
     if ($l -match '^\s*bind\s+ssl\s+vserver\s+(?<vs>\S+)\s+-certkeyName\s+(?<ck>\S+)\b') {
+      $vsName = $Matches['vs']
+      $certName = $Matches['ck']
+      if (-not $vsName -or -not $certName) { continue }
       $m.Bindings += @{
-        TargetType="SSL vServer"; TargetName=$Matches.vs
-        Feature="SSL"; PolicyName=$Matches.ck; Priority=$null
+        TargetType="SSL vServer"; TargetName=$vsName
+        Feature="SSL"; PolicyName=$certName; Priority=$null
         BindType="ssl-vserver->certkey"; Extra=$l
       }
-      Mark-Ref $m "UsedCertKey" $Matches.ck
+      Mark-Ref $m "UsedCertKey" $certName
       continue
     }
   }
@@ -628,10 +666,10 @@ function Get-CsFlows {
       LbVip = $lbDetails.Vip
       LbPort = $lbDetails.Port
       LbProto = $lbDetails.Proto
-      LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-      LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-      LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-      LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+      LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+      LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+      LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+      LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
     }
   }
 
@@ -664,10 +702,10 @@ function Get-CsFlows {
         LbVip = $lbDetails.Vip
         LbPort = $lbDetails.Port
         LbProto = $lbDetails.Proto
-        LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-        LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-        LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-        LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+        LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+        LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+        LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+        LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
       }
     }
   }
@@ -796,16 +834,45 @@ function Get-BackendTable {
   }
 }
 
+function Get-EntryPoints {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $entrypoints = @()
+
+  foreach ($k in $m.CsVserver.Keys) {
+    $o = $m.CsVserver[$k]
+    $entrypoints += [pscustomobject]@{
+      Type="CS vServer"
+      Name=$k
+      Address=("{0}:{1}" -f $o.vip, $o.port)
+      Proto=$o.proto
+      ReferencedByCS=""
+    }
+  }
+  foreach ($k in $m.LbVserver.Keys) {
+    $o = $m.LbVserver[$k]
+    $entrypoints += [pscustomobject]@{
+      Type="LB vServer"
+      Name=$k
+      Address=("{0}:{1}" -f $o.vip, $o.port)
+      Proto=$o.proto
+      ReferencedByCS = if ($m.Refs.UsedLbVserver.ContainsKey($k)) { "Yes" } else { "No" }
+    }
+  }
+
+  return $entrypoints
+}
+
 # ---------------------------
 # Stray artifact detection
 # ---------------------------
 function Get-StrayArtifacts {
   param([Parameter(Mandatory=$true)]$m)
 
-  $items = @()
+  $items = New-Object 'System.Collections.Generic.List[object]'
 
   function Add-Stray($type, $name, $reason) {
-    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+    $null = $items.Add([pscustomobject]@{ Type=$type; Name=$name; Reason=$reason })
   }
 
   # Defined but not used
@@ -849,7 +916,109 @@ function Get-StrayArtifacts {
 # ---------------------------
 # Graph (meaningful, not exhaustive)
 # ---------------------------
-function Write-FlowDot {
+function Write-EntryPointFlowDot {
+  param(
+    [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)]$entrypoint,
+    [Parameter(Mandatory=$true)][string]$baseName,
+    [Parameter(Mandatory=$true)][string]$dir,
+    [Parameter(Mandatory=$true)]$csFlows
+  )
+
+  $dotPath = Join-Path $dir ($baseName + ".flow.dot")
+  $backendLookup = Get-BackendLookup -m $m
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("digraph netscaler {")
+  $lines.Add("  rankdir=LR;")
+  $lines.Add('  node [shape=box, fontsize=10];')
+  $lines.Add('  edge [fontsize=9];')
+  $lines.Add(('  label="Entry Point Flow: {0}"; labelloc="t"; fontsize=18;' -f $entrypoint.Name))
+
+  $seen = @{}
+  function Node($id, $label) {
+    if ($seen.ContainsKey($id)) { return }
+    $seen[$id] = $true
+    $safe = ($label -replace '"','\"')
+    $lines.Add(("  {0} [label=""{1}""];" -f $id, $safe))
+  }
+  function Edge($from, $to, $label) {
+    $safe = ($label -replace '"','\"')
+    $lines.Add(("  {0} -> {1} [label=""{2}""];" -f $from, $to, $safe))
+  }
+  function Id($prefix, $name) {
+    return (($prefix + "_" + ($name -replace '[^a-zA-Z0-9_]', '_')))
+  }
+  function Add-LbTargets([string]$lbName) {
+    if (-not $lbName) { return }
+    $lbId = Id "lb" $lbName
+    Node $lbId ("LB vServer`n{0}" -f $lbName)
+    $targets = if ($backendLookup.LbTargets.ContainsKey($lbName)) { @($backendLookup.LbTargets[$lbName]) } else { @() }
+    foreach ($t in $targets) {
+      if ($m.ServiceGroup.ContainsKey($t)) {
+        $sgId = Id "sg" $t
+        Node $sgId ("Service Group`n{0}" -f $t)
+        Edge $lbId $sgId "backend"
+        if ($backendLookup.ServiceGroupMembers.ContainsKey($t)) {
+          foreach ($member in @($backendLookup.ServiceGroupMembers[$t])) {
+            $memId = Id "member" ($t + "_" + $member)
+            Node $memId ("Member`n{0}" -f $member)
+            Edge $sgId $memId "member"
+          }
+        }
+        if ($backendLookup.ServiceGroupMonitors.ContainsKey($t)) {
+          foreach ($mon in @($backendLookup.ServiceGroupMonitors[$t])) {
+            $monId = Id "mon" ($t + "_" + $mon)
+            Node $monId ("Monitor`n{0}" -f $mon)
+            Edge $sgId $monId "monitor"
+          }
+        }
+      } elseif ($m.Service.ContainsKey($t)) {
+        $svcId = Id "svc" $t
+        Node $svcId ("Service`n{0}" -f $t)
+        Edge $lbId $svcId "backend"
+      } else {
+        $unkId = Id "backend" $t
+        Node $unkId ("Backend`n{0}" -f $t)
+        Edge $lbId $unkId "backend"
+      }
+    }
+  }
+
+  if ($entrypoint.Type -eq "CS vServer") {
+    foreach ($r in @($csFlows | Where-Object { $_.CsVserver -eq $entrypoint.Name })) {
+      $vsId = Id "cs" $r.CsVserver
+      $polId= Id "csp" $r.CsPolicy
+      $actId= Id "csa" $r.CsAction
+      $lbId = if ($r.TargetLbVserver) { Id "lb" $r.TargetLbVserver } else { $null }
+      $prioLabel = if ($r.Source -eq "label") {
+        "vs={0},pol={1}" -f $r.VserverPriority, $r.PolicyPriority
+      } else {
+        "prio={0}" -f $r.VserverPriority
+      }
+
+      Node $vsId ("CS vServer`n{0}" -f $r.CsVserver)
+      Node $polId ("CS Policy`n{0}" -f $r.CsPolicy)
+      Node $actId ("CS Action`n{0}" -f $r.CsAction)
+      Edge $vsId $polId $prioLabel
+      Edge $polId $actId "action"
+
+      if ($lbId) {
+        Node $lbId ("LB vServer`n{0}" -f $r.TargetLbVserver)
+        Edge $actId $lbId "target"
+        Add-LbTargets $r.TargetLbVserver
+      }
+    }
+  } elseif ($entrypoint.Type -eq "LB vServer") {
+    Add-LbTargets $entrypoint.Name
+  }
+
+  $lines.Add("}")
+  Out-FileUtf8NoBom -Path $dotPath -Content ($lines -join "`r`n")
+  return $dotPath
+}
+
+function Write-FullFlowDot {
   param(
     [Parameter(Mandatory=$true)]$m,
     [Parameter(Mandatory=$true)][string]$baseName,
@@ -858,6 +1027,7 @@ function Write-FlowDot {
   )
 
   $dotPath = Join-Path $dir ($baseName + ".flow.dot")
+  $backendLookup = Get-BackendLookup -m $m
 
   $lines = New-Object System.Collections.Generic.List[string]
   $lines.Add("digraph netscaler {")
@@ -866,7 +1036,6 @@ function Write-FlowDot {
   $lines.Add('  edge [fontsize=9];')
   $lines.Add(('  label="Flow (migration-focused): {0}"; labelloc="t"; fontsize=18;' -f $baseName))
 
-  # Nodes: CS VS, CS policy, CS action, LB VS (only those referenced by CS flows)
   $seen = @{}
 
   function Node($id, $label) {
@@ -881,6 +1050,41 @@ function Write-FlowDot {
   }
   function Id($prefix, $name) {
     return (($prefix + "_" + ($name -replace '[^a-zA-Z0-9_]', '_')))
+  }
+  function Add-LbTargets([string]$lbName) {
+    if (-not $lbName) { return }
+    $lbId = Id "lb" $lbName
+    Node $lbId ("LB vServer`n{0}" -f $lbName)
+    $targets = if ($backendLookup.LbTargets.ContainsKey($lbName)) { @($backendLookup.LbTargets[$lbName]) } else { @() }
+    foreach ($t in $targets) {
+      if ($m.ServiceGroup.ContainsKey($t)) {
+        $sgId = Id "sg" $t
+        Node $sgId ("Service Group`n{0}" -f $t)
+        Edge $lbId $sgId "backend"
+        if ($backendLookup.ServiceGroupMembers.ContainsKey($t)) {
+          foreach ($member in @($backendLookup.ServiceGroupMembers[$t])) {
+            $memId = Id "member" ($t + "_" + $member)
+            Node $memId ("Member`n{0}" -f $member)
+            Edge $sgId $memId "member"
+          }
+        }
+        if ($backendLookup.ServiceGroupMonitors.ContainsKey($t)) {
+          foreach ($mon in @($backendLookup.ServiceGroupMonitors[$t])) {
+            $monId = Id "mon" ($t + "_" + $mon)
+            Node $monId ("Monitor`n{0}" -f $mon)
+            Edge $sgId $monId "monitor"
+          }
+        }
+      } elseif ($m.Service.ContainsKey($t)) {
+        $svcId = Id "svc" $t
+        Node $svcId ("Service`n{0}" -f $t)
+        Edge $lbId $svcId "backend"
+      } else {
+        $unkId = Id "backend" $t
+        Node $unkId ("Backend`n{0}" -f $t)
+        Edge $lbId $unkId "backend"
+      }
+    }
   }
 
   foreach ($r in @($csFlows)) {
@@ -903,8 +1107,16 @@ function Write-FlowDot {
     if ($lbId) {
       Node $lbId ("LB vServer`n{0}" -f $r.TargetLbVserver)
       Edge $actId $lbId "target"
+      Add-LbTargets $r.TargetLbVserver
     }
   }
+
+  $lbInUse = @{}
+  foreach ($lbName in @($backendLookup.LbTargets.Keys)) { $lbInUse[$lbName] = $true }
+  foreach ($r in @($csFlows)) {
+    if ($r.TargetLbVserver) { $lbInUse[$r.TargetLbVserver] = $true }
+  }
+  foreach ($lbName in @($lbInUse.Keys)) { Add-LbTargets $lbName }
 
   # Global responder/rewrite callouts (not drawn to every vserver; just note)
   $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" })
@@ -927,20 +1139,24 @@ function Write-FlowDot {
 function Write-Report {
   param(
     [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)][string]$reportTitle,
     [Parameter(Mandatory=$true)][string]$baseName,
+    [Parameter(Mandatory=$true)][string]$reportFileName,
     [Parameter(Mandatory=$true)][string]$dir,
     [Parameter(Mandatory=$true)]$csFlows,
     [Parameter(Mandatory=$true)]$respTable,
     [Parameter(Mandatory=$true)]$rwTable,
     [Parameter(Mandatory=$true)]$backend,
     [Parameter(Mandatory=$true)]$strays,
+    [Parameter(Mandatory=$true)]$entrypoints,
+    [Parameter(Mandatory=$true)]$entrypointFlows,
     [string]$flowDot,
     [string]$flowGraphic
   )
 
   Ensure-Dir $dir
 
-  $htmlPath = Join-Path $dir ($baseName + ".report.html")
+  $htmlPath = Join-Path $dir $reportFileName
   $csCsv    = Join-Path $dir ($baseName + ".csflows.csv")
   $respCsv  = Join-Path $dir ($baseName + ".responder.csv")
   $rwCsv    = Join-Path $dir ($baseName + ".rewrite.csv")
@@ -954,23 +1170,6 @@ function Write-Report {
   @($backend.LbToBackend) | Export-Csv -NoTypeInformation -Path $lbCsv -Encoding UTF8
   @($backend.ServiceGroupExpansion) | Export-Csv -NoTypeInformation -Path $sgCsv -Encoding UTF8
   @($strays)     | Export-Csv -NoTypeInformation -Path $strayCsv -Encoding UTF8
-
-  $entrypoints = @()
-
-  foreach ($k in $m.CsVserver.Keys) {
-    $o = $m.CsVserver[$k]
-    $entrypoints += [pscustomobject]@{ Type="CS vServer"; Name=$k; Address=("{0}:{1}" -f $o.vip, $o.port); Proto=$o.proto }
-  }
-  foreach ($k in $m.LbVserver.Keys) {
-    $o = $m.LbVserver[$k]
-    $entrypoints += [pscustomobject]@{
-      Type="LB vServer"
-      Name=$k
-      Address=("{0}:{1}" -f $o.vip, $o.port)
-      Proto=$o.proto
-      ReferencedByCS = if ($m.Refs.UsedLbVserver.ContainsKey($k)) { "Yes" } else { "No" }
-    }
-  }
 
   $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" } | Sort-Object Priority, PolicyName)
   $globRw   = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Rewrite" } | Sort-Object Priority, PolicyName)
@@ -995,28 +1194,68 @@ function Write-Report {
     MissingActions = @($missingActions).Count
   }
 
+  $summaryCards = @(
+    [pscustomobject]@{ Label="Entry Points"; Value=$summary.Entrypoints },
+    [pscustomobject]@{ Label="CS Flows"; Value=$summary.CsFlows },
+    [pscustomobject]@{ Label="Responder Bindings"; Value=$summary.ResponderBindings },
+    [pscustomobject]@{ Label="Rewrite Bindings"; Value=$summary.RewriteBindings },
+    [pscustomobject]@{ Label="LB Backends"; Value=$summary.LbBackends },
+    [pscustomobject]@{ Label="Stray Artifacts"; Value=$summary.StrayArtifacts }
+  )
+
+  $chartMax = 1
+  foreach ($c in $summaryCards) { if ($c.Value -gt $chartMax) { $chartMax = $c.Value } }
+  $chartRows = ($summaryCards | ForEach-Object {
+    $pct = [math]::Round(($_.Value / $chartMax) * 100, 0)
+    "<div class=""chart-row""><span>$($_.Label)</span><div class=""bar""><div class=""bar-fill"" style=""width:$pct%""></div></div><strong>$($_.Value)</strong></div>"
+  }) -join "`r`n"
+
+  $entrypointRows = @($entrypoints | Sort-Object Type, Name)
+  $entrypointLinks = @($entrypoints | Sort-Object Type, Name | ForEach-Object {
+    $key = "{0}::{1}" -f $_.Type, $_.Name
+    $diagram = if ($entrypointFlows.ContainsKey($key)) { $entrypointFlows[$key] } else { "" }
+    if ($diagram) { "<li><a href=""$diagram"">$($_.Type) - $($_.Name)</a></li>" }
+  })
+
   $html = @"
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>$baseName - NetScaler Migration Report</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>$reportTitle - NetScaler Migration Report</title>
   <style>
-    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; }
+    :root { color-scheme: light; }
+    body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; background: #f7f9fc; color: #1b1f23; }
+    header { background: linear-gradient(120deg, #0a4ea3, #2d7dd2); color: #fff; padding: 28px 32px; }
+    header h1 { margin: 0 0 6px 0; font-size: 26px; }
+    header p { margin: 0; opacity: 0.9; }
+    main { padding: 24px 32px 40px; }
+    section { background: #fff; border-radius: 10px; padding: 18px 20px; margin: 0 0 18px 0; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+    h2 { margin-top: 0; font-size: 20px; }
+    h3 { margin-bottom: 6px; }
     table { border-collapse: collapse; width: 100%; margin: 12px 0 18px 0; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
-    th { background: #f3f3f3; }
-    h2 { margin-top: 28px; }
-    .callout { background: #fff8e1; border: 1px solid #f1e0a3; padding: 10px; }
-    pre { background: #f8f8f8; padding: 10px; border: 1px solid #eee; overflow-x: auto; }
-    .small { color: #555; font-size: 12px; }
+    th, td { border: 1px solid #e4e7eb; padding: 8px 10px; vertical-align: top; font-size: 13px; }
+    th { background: #f0f3f8; text-align: left; }
+    .small { color: #586069; font-size: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    .card { background: #f8fafc; border: 1px solid #e4e7eb; border-radius: 8px; padding: 12px 14px; }
+    .card strong { display: block; font-size: 18px; }
+    .callout { background: #eef6ff; border-left: 4px solid #2d7dd2; padding: 12px 14px; border-radius: 6px; }
+    .chart-row { display: grid; grid-template-columns: 160px 1fr 60px; gap: 10px; align-items: center; margin: 6px 0; }
+    .bar { background: #e9edf2; border-radius: 10px; height: 10px; overflow: hidden; }
+    .bar-fill { height: 10px; background: linear-gradient(90deg, #2d7dd2, #74b9ff); }
+    .links a { margin-right: 12px; }
   </style>
 </head>
 <body>
-  <h1>NetScaler Migration Report</h1>
-  <p><b>Source:</b> $($m.File)</p>
+  <header>
+    <h1>$reportTitle - Migration Readiness Report</h1>
+    <p>Source configuration: $($m.File)</p>
+  </header>
+  <main>
 
-  <div class="callout">
+  <section class="callout">
     <b>How to use this report for migration</b>
     <ul>
       <li>Start with <b>Entry Points</b>.</li>
@@ -1025,56 +1264,88 @@ function Write-Report {
       <li>Use <b>LB Backends</b> to rebuild server pools and monitors.</li>
       <li>Review <b>Stray Artifacts</b> to clean up or confirm intent before migrating.</li>
     </ul>
-  </div>
+  </section>
 
-  <h2>Migration Summary</h2>
-  <p class="small">Use this section to quickly spot scope and potential cleanup needs.</p>
-  $((@($summary) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Migration Summary</h2>
+    <p class="small">Use this section to quickly spot scope and potential cleanup needs.</p>
+    <div class="grid">
+      $((@($summaryCards) | ForEach-Object { "<div class=""card""><span>$($_.Label)</span><strong>$($_.Value)</strong></div>" }) -join "`r`n")
+    </div>
+    <div style="margin-top:12px;">
+      $chartRows
+    </div>
+  </section>
 
-  <h2>Entry Points</h2>
-  $((@($entrypoints) | Sort-Object Type, Name | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Entry Points</h2>
+    $((@($entrypointRows) | ConvertTo-Html -Fragment -PreContent "<div class=""small"">Entry-point diagrams show the policy/backend flow tied to each ingress.</div>"))
+    <ul>
+      $($entrypointLinks -join "`r`n")
+    </ul>
+  </section>
 
-  <h2>Global Bindings (High Impact)</h2>
-  <p class="small">These policies can affect broad traffic scope. Validate intent before migrating.</p>
-  <h3>Responder (global)</h3>
-  $((@($globResp) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
-  <h3>Rewrite (global)</h3>
-  $((@($globRw) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Global Bindings (High Impact)</h2>
+    <p class="small">These policies can affect broad traffic scope. Validate intent before migrating.</p>
+    <h3>Responder (global)</h3>
+    $((@($globResp) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+    <h3>Rewrite (global)</h3>
+    $((@($globRw) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+  </section>
 
-  $flowLink
+  <section class="links">
+    <h2>Overall Flow Diagram</h2>
+    $flowLink
+  </section>
 
-  <h2>CS Routing Flows (CS vServer → Policy → Action → Target LB vServer)</h2>
-  <p class="small">This is the core “where does traffic go?” view.</p>
-  $((@($csFlows) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>CS Routing Flows (CS vServer → Policy → Action → Target LB vServer)</h2>
+    <p class="small">This is the core “where does traffic go?” view.</p>
+    $((@($csFlows) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>Responder (Bound Policy → Rule → Action Definition)</h2>
-  <p class="small">This section explains what responder policies do by pairing policies with their actions.</p>
-  $((@($respTable) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Responder (Bound Policy → Rule → Action Definition)</h2>
+    <p class="small">This section explains what responder policies do by pairing policies with their actions.</p>
+    $((@($respTable) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>Rewrite (Bound Policy → Rule → Action Definition)</h2>
-  <p class="small">This section explains rewrite behavior by pairing policies with actions.</p>
-  $((@($rwTable) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Rewrite (Bound Policy → Rule → Action Definition)</h2>
+    <p class="small">This section explains rewrite behavior by pairing policies with actions.</p>
+    $((@($rwTable) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>LB Backends (LB vServer → Backend target)</h2>
-  $((@($backend.LbToBackend) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>LB Backends (LB vServer → Backend target)</h2>
+    $((@($backend.LbToBackend) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>Service Group Expansion (Members + Monitors)</h2>
-  $((@($backend.ServiceGroupExpansion) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Service Group Expansion (Members + Monitors)</h2>
+    $((@($backend.ServiceGroupExpansion) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>Stray Artifacts (Review Candidates)</h2>
-  <p class="small">Likely unused, or missing from the provided config set. Confirm before migrating.</p>
-  $((@($strays) | ConvertTo-Html -Fragment))
+  <section>
+    <h2>Stray Artifacts (Review Candidates)</h2>
+    <p class="small">Likely unused, or missing from the provided config set. Confirm before migrating.</p>
+    $((@($strays) | ConvertTo-Html -Fragment))
+  </section>
 
-  <h2>Downloads</h2>
-  <ul>
-    <li><a href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a></li>
-    <li><a href="$([IO.Path]::GetFileName($respCsv))">$([IO.Path]::GetFileName($respCsv))</a></li>
-    <li><a href="$([IO.Path]::GetFileName($rwCsv))">$([IO.Path]::GetFileName($rwCsv))</a></li>
-    <li><a href="$([IO.Path]::GetFileName($lbCsv))">$([IO.Path]::GetFileName($lbCsv))</a></li>
-    <li><a href="$([IO.Path]::GetFileName($sgCsv))">$([IO.Path]::GetFileName($sgCsv))</a></li>
-    <li><a href="$([IO.Path]::GetFileName($strayCsv))">$([IO.Path]::GetFileName($strayCsv))</a></li>
-  </ul>
+  <section>
+    <h2>Downloads</h2>
+    <ul>
+      <li><a href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a></li>
+      <li><a href="$([IO.Path]::GetFileName($respCsv))">$([IO.Path]::GetFileName($respCsv))</a></li>
+      <li><a href="$([IO.Path]::GetFileName($rwCsv))">$([IO.Path]::GetFileName($rwCsv))</a></li>
+      <li><a href="$([IO.Path]::GetFileName($lbCsv))">$([IO.Path]::GetFileName($lbCsv))</a></li>
+      <li><a href="$([IO.Path]::GetFileName($sgCsv))">$([IO.Path]::GetFileName($sgCsv))</a></li>
+      <li><a href="$([IO.Path]::GetFileName($strayCsv))">$([IO.Path]::GetFileName($strayCsv))</a></li>
+    </ul>
+  </section>
 
+  </main>
 </body>
 </html>
 "@
@@ -1094,166 +1365,60 @@ try {
 }
 
 Ensure-Dir $OutDir
-$perFileDir  = Join-Path $OutDir "per-file"
-$combinedDir = Join-Path $OutDir "combined"
-Ensure-Dir $perFileDir
-Ensure-Dir $combinedDir
+$reportBaseName = $VPXName
+$reportDir = Join-Path $OutDir $VPXName
+Ensure-Dir $reportDir
 
 $dotExe = Find-DotExe -override $DotExePath
-
-$models = @()
-foreach ($f in $ConfigFiles) {
-  if (-not (Test-Path -LiteralPath $f)) { throw "Config file not found: $f" }
-  $models += Parse-NsConfigFile -FilePath $f
-}
-
-$indexRows = @()
 $renderWarn = @()
 
-foreach ($m in $models) {
-  $name = [IO.Path]::GetFileNameWithoutExtension($m.File)
-  $dir  = Join-Path $perFileDir $name
-  Ensure-Dir $dir
+if (-not (Test-Path -LiteralPath $ConfigFile)) { throw "Config file not found: $ConfigFile" }
+$m = Parse-NsConfigFile -FilePath $ConfigFile
 
-  $csFlows   = Get-CsFlows -m $m
-  $respTable = Get-ResponderTable -m $m
-  $rwTable   = Get-RewriteTable -m $m
-  $backend   = Get-BackendTable -m $m
-  $strays    = Get-StrayArtifacts -m $m
+$csFlows   = Get-CsFlows -m $m
+if ($null -eq $csFlows) { $csFlows = @() }
+$respTable = Get-ResponderTable -m $m
+if ($null -eq $respTable) { $respTable = @() }
+$rwTable   = Get-RewriteTable -m $m
+if ($null -eq $rwTable) { $rwTable = @() }
+$backend   = Get-BackendTable -m $m
+if ($null -eq $backend) {
+  $backend = [pscustomobject]@{ LbToBackend=@(); ServiceGroupExpansion=@() }
+}
+$strays    = Get-StrayArtifacts -m $m
+if ($null -eq $strays) { $strays = @() }
+$entrypoints = Get-EntryPoints -m $m
+if ($null -eq $entrypoints) { $entrypoints = @() }
 
-  $flowDot = Write-FlowDot -m $m -baseName $name -dir $dir -csFlows $csFlows
-  $flowGraphic = $null
-
+$entrypointFlows = @{}
+foreach ($ep in @($entrypoints)) {
+  $safeName = Get-SafeFileName -Name ("{0}_{1}" -f $ep.Type, $ep.Name)
+  $entryBase = $safeName
+  $epDot = Write-EntryPointFlowDot -m $m -entrypoint $ep -baseName $entryBase -dir $reportDir -csFlows $csFlows
+  $epGraphic = $null
   if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
-    $flowGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $flowDot -Format $GraphFormat
-    if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
+    $epGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $epDot -Format $GraphFormat
+    if (-not $epGraphic) { $renderWarn += "Render failed: $epDot" }
   }
-
-  $report = Write-Report -m $m -baseName $name -dir $dir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -flowDot $flowDot -flowGraphic $flowGraphic
-
-  $indexRows += [pscustomobject]@{
-    File       = $m.File
-    ReportHtml = $report
-    Flow       = if ($flowGraphic) { $flowGraphic } else { $flowDot }
-  }
+  $entrypointFlows["{0}::{1}" -f $ep.Type, $ep.Name] = if ($epGraphic) { [IO.Path]::GetFileName($epGraphic) } else { [IO.Path]::GetFileName($epDot) }
 }
 
-# Combined report (merge by concatenating definitions/bindings; “missing” checks become more accurate)
-$cm = New-NsModel
-$cm.File = "ALL FILES (combined)"
-
-foreach ($m in $models) {
-  foreach ($k in $m.CsVserver.Keys)        { $cm.CsVserver[$k] = $m.CsVserver[$k] }
-  foreach ($k in $m.LbVserver.Keys)        { $cm.LbVserver[$k] = $m.LbVserver[$k] }
-  foreach ($k in $m.Server.Keys)           { $cm.Server[$k] = $m.Server[$k] }
-  foreach ($k in $m.ServiceGroup.Keys)     { $cm.ServiceGroup[$k] = $m.ServiceGroup[$k] }
-  foreach ($k in $m.Service.Keys)          { $cm.Service[$k] = $m.Service[$k] }
-  foreach ($k in $m.Monitor.Keys)          { $cm.Monitor[$k] = $m.Monitor[$k] }
-  foreach ($k in $m.SslCertKey.Keys)       { $cm.SslCertKey[$k] = $m.SslCertKey[$k] }
-  foreach ($k in $m.CsAction.Keys)         { $cm.CsAction[$k] = $m.CsAction[$k] }
-  foreach ($k in $m.CsPolicy.Keys)         { $cm.CsPolicy[$k] = $m.CsPolicy[$k] }
-  foreach ($k in $m.CsPolicyLabel.Keys)    { $cm.CsPolicyLabel[$k] = $m.CsPolicyLabel[$k] }
-  foreach ($k in $m.ResponderAction.Keys)  { $cm.ResponderAction[$k] = $m.ResponderAction[$k] }
-  foreach ($k in $m.ResponderPolicy.Keys)  { $cm.ResponderPolicy[$k] = $m.ResponderPolicy[$k] }
-  foreach ($k in $m.RewriteAction.Keys)    { $cm.RewriteAction[$k] = $m.RewriteAction[$k] }
-  foreach ($k in $m.RewritePolicy.Keys)    { $cm.RewritePolicy[$k] = $m.RewritePolicy[$k] }
-  foreach ($k in $m.Patset.Keys)           { $cm.Patset[$k] = $true }
-  foreach ($k in $m.Dataset.Keys)          { $cm.Dataset[$k] = $true }
-
-  $cm.Bindings += @($m.Bindings)
-}
-
-# recompute refs/actions usage for combined
-# mark refs from combined bindings
-foreach ($b in @($cm.Bindings)) {
-  switch ($b.Feature) {
-    "CS" {
-      if ($b.BindType -eq "cs-vserver->cs-policy")       { Mark-Ref $cm "UsedCsPolicy" $b.PolicyName }
-      if ($b.BindType -eq "cs-vserver->cs-policylabel")  { Mark-Ref $cm "UsedCsPolicyLabel" $b.PolicyName }
-      if ($b.BindType -eq "cs-policylabel->cs-policy")   { Mark-Ref $cm "UsedCsPolicyLabel" $b.TargetName; Mark-Ref $cm "UsedCsPolicy" $b.PolicyName }
-    }
-    "Responder" { Mark-Ref $cm "UsedResponderPolicy" $b.PolicyName }
-    "Rewrite"   { Mark-Ref $cm "UsedRewritePolicy" $b.PolicyName }
-    "LB" {
-      if ($b.TargetType -eq "LB vServer") { Mark-Ref $cm "UsedLbVserver" $b.TargetName }
-    }
-    "SSL" { Mark-Ref $cm "UsedCertKey" $b.PolicyName }
-  }
-}
-foreach ($p in $cm.CsPolicy.Keys)        { if ($cm.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedCsAction" $cm.CsPolicy[$p].action } }
-foreach ($p in $cm.ResponderPolicy.Keys) { if ($cm.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedResponderAction" $cm.ResponderPolicy[$p].action } }
-foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $cm "UsedRewriteAction" $cm.RewritePolicy[$p].action } }
-
-$combinedName = "ALL"
-$csFlowsC   = Get-CsFlows -m $cm
-$respTableC = Get-ResponderTable -m $cm
-$rwTableC   = Get-RewriteTable -m $cm
-$backendC   = Get-BackendTable -m $cm
-$straysC    = Get-StrayArtifacts -m $cm
-$flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
-$flowGraphicC = $null
-
+$flowBase = "{0}_Flow" -f (Get-SafeFileName -Name $reportBaseName)
+$flowDot = Write-FullFlowDot -m $m -baseName $flowBase -dir $reportDir -csFlows $csFlows
+$flowGraphic = $null
 if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
-  $flowGraphicC = Render-GraphSafe -DotExe $dotExe -DotPath $flowDotC -Format $GraphFormat
-  if (-not $flowGraphicC) { $renderWarn += "Render failed: $flowDotC" }
+  $flowGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $flowDot -Format $GraphFormat
+  if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
 }
+$flowGraphicName = if ($flowGraphic) { [IO.Path]::GetFileName($flowGraphic) } else { $null }
+$flowDotName = [IO.Path]::GetFileName($flowDot)
 
-$combinedReport = Write-Report -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC -respTable $respTableC -rwTable $rwTableC -backend $backendC -strays $straysC -flowDot $flowDotC -flowGraphic $flowGraphicC
+$reportFileName = "{0}_ConfigurationReport.html" -f $reportBaseName
+$report = Write-Report -m $m -reportTitle $VPXName -baseName $reportBaseName -reportFileName $reportFileName -dir $reportDir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -entrypoints $entrypoints -entrypointFlows $entrypointFlows -flowDot $flowDotName -flowGraphic $flowGraphicName
 
-# Index
-$indexHtml = Join-Path $OutDir "index.html"
-$rows = ($indexRows | ForEach-Object {
-  "<tr><td>$($_.File)</td><td><a href=""$($_.ReportHtml)"">report</a></td><td><a href=""$($_.Flow)"">flow</a></td></tr>"
-}) -join "`r`n"
-
-$warnBlock = ""
 if (@($renderWarn).Count -gt 0) {
-  $warnBlock = "<h2>Graph Rendering Warnings</h2><pre>" + ($renderWarn -join "`n") + "</pre>"
+  Write-Warning ("Graph render warnings:`r`n" + ($renderWarn -join "`r`n"))
 }
 
-$renderStatus =
-  if ($SkipGraphRender) { "Skipped (-SkipGraphRender). DOT only." }
-  elseif (-not $dotExe) { "dot.exe not found. DOT only." }
-  elseif ($GraphFormat -eq 'dot') { "Format=dot. DOT only." }
-  else { "Attempted $GraphFormat using $dotExe" }
-
-$idx = @"
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>NetScaler Migration Overview</title>
-  <style>
-    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; }
-    table { border-collapse: collapse; width: 100%; margin: 12px 0 18px 0; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
-    th { background: #f3f3f3; }
-    pre { background: #f8f8f8; padding: 10px; border: 1px solid #eee; }
-  </style>
-</head>
-<body>
-  <h1>NetScaler Migration Overview</h1>
-
-  <h2>Combined</h2>
-  <ul>
-    <li><a href="$combinedReport">ALL.report.html</a></li>
-    <li><a href="$(if ($flowGraphicC) { $flowGraphicC } else { $flowDotC })">ALL flow</a></li>
-  </ul>
-
-  <h2>Per-file</h2>
-  <table>
-    <tr><th>Config File</th><th>Report</th><th>Flow</th></tr>
-    $rows
-  </table>
-
-  <h2>Graph rendering</h2>
-  <p><b>Status:</b> $renderStatus</p>
-  $warnBlock
-</body>
-</html>
-"@
-
-Out-FileUtf8NoBom -Path $indexHtml -Content $idx
-
-Write-Host ("Output directory: {0}" -f $OutDir)
-Write-Host ("Index: {0}" -f $indexHtml)
+Write-Host ("Report directory: {0}" -f $reportDir)
+Write-Host ("Report: {0}" -f (Join-Path $reportDir $reportFileName))
