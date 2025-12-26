@@ -499,7 +499,7 @@ function Parse-NsConfigFile {
         Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
         BindType="responder->policy"; Extra=$l
       }
-      Mark-Ref $m "UsedResponderPolicy" $Matches.pol
+      Mark-Ref $m "UsedResponderPolicy" $polName
       continue
     }
 
