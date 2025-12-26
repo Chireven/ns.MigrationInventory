@@ -121,6 +121,47 @@ function Find-DotExe {
   return $null
 }
 
+function New-LogContext {
+  $start = Get-Date
+  return [pscustomobject]@{
+    Start = $start
+    LastStep = $start
+    StepCount = 0
+  }
+}
+
+function Write-StageStart {
+  param(
+    [Parameter(Mandatory=$true)]$Context,
+    [Parameter(Mandatory=$true)][string]$Message
+  )
+  $Context.StepCount++
+  $Context.LastStep = Get-Date
+  $stamp = $Context.LastStep.ToString("HH:mm:ss")
+  Write-Host ("[{0}] ▶ {1}" -f $stamp, $Message) -ForegroundColor Cyan
+}
+
+function Write-StageComplete {
+  param(
+    [Parameter(Mandatory=$true)]$Context,
+    [Parameter(Mandatory=$true)][string]$Message
+  )
+  $now = Get-Date
+  $elapsed = $now - $Context.LastStep
+  $total = $now - $Context.Start
+  $stamp = $now.ToString("HH:mm:ss")
+  Write-Host ("[{0}] ✔ {1} ({2:N1}s, total {3:N1}s)" -f $stamp, $Message, $elapsed.TotalSeconds, $total.TotalSeconds) -ForegroundColor Green
+}
+
+function Write-StageNote {
+  param(
+    [Parameter(Mandatory=$true)]$Context,
+    [Parameter(Mandatory=$true)][string]$Message
+  )
+  $stamp = (Get-Date).ToString("HH:mm:ss")
+  Write-Host ("[{0}] ℹ {1}" -f $stamp, $Message) -ForegroundColor Yellow
+}
+
 function Render-GraphSafe {
   param(
     [Parameter(Mandatory=$true)][string]$DotExe,
@@ -1193,7 +1234,7 @@ function Write-Report {
   if ($flowGraphicName) {
     $flowLink = "<p><b>Flow graphic:</b> <a class=""badge-link"" href=""$flowGraphicName"" data-viewer=""image"" data-file=""$flowGraphicName"">View Diagram</a></p>"
   } elseif ($flowDotName) {
-    $flowLink = "<p><b>Flow DOT:</b> <a class=""badge-link"" href=""#dot-overall-flow"">View DOT</a></p>"
+    $flowLink = "<p><b>Flow diagram:</b> <a class=""badge-link"" href=""#dot-overall-flow"" data-viewer=""dot"" data-dotid=""dot-overall-flow"">View Diagram</a> <a class=""badge-link"" href=""#dot-overall-flow"">View DOT</a></p>"
   }
 
   $missingDefs = @($strays | Where-Object { $_.Reason -like "Referenced but not defined*" })
@@ -1236,7 +1277,7 @@ function Write-Report {
       if ($flowItem.IsImage) {
         "<li><span>$($ep.Type) - $($ep.Name)</span> <a class=""badge-link"" href=""$($flowItem.FileName)"" data-viewer=""image"" data-file=""$($flowItem.FileName)"">View Diagram</a> <a class=""badge-link"" href=""#$($flowItem.DotId)"">View DOT</a></li>"
       } else {
-        "<li><span>$($ep.Type) - $($ep.Name)</span> <a class=""badge-link"" href=""#$($flowItem.DotId)"">View DOT</a></li>"
+        "<li><span>$($ep.Type) - $($ep.Name)</span> <a class=""badge-link"" href=""#$($flowItem.DotId)"" data-viewer=""dot"" data-dotid=""$($flowItem.DotId)"">View Diagram</a> <a class=""badge-link"" href=""#$($flowItem.DotId)"">View DOT</a></li>"
       }
     }
   })
@@ -1286,6 +1327,8 @@ function Write-Report {
     #image-viewer header button { background: transparent; border: none; color: #fff; font-size: 18px; cursor: pointer; }
     #image-viewer .viewer-body { padding: 16px; overflow: auto; background: #f8fafc; }
     #image-viewer img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    #image-viewer .viewer-svg { display: none; }
+    #image-viewer .viewer-svg svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
     pre { white-space: pre-wrap; background: #f8fafc; border: 1px solid #e4e7eb; border-radius: 8px; padding: 12px; font-size: 12px; }
   </style>
 </head>
@@ -1406,20 +1449,48 @@ function Write-Report {
       </header>
       <div class="viewer-body">
         <img id="viewer-image" alt="Diagram preview">
+        <div id="viewer-svg" class="viewer-svg" aria-live="polite"></div>
       </div>
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/viz.js@2.1.2/viz.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/viz.js@2.1.2/full.render.js"></script>
   <script>
     const viewer = document.getElementById('image-viewer');
     const viewerImage = document.getElementById('viewer-image');
+    const viewerSvg = document.getElementById('viewer-svg');
     const viewerTitle = document.getElementById('viewer-title');
     const viewerClose = document.getElementById('viewer-close');
+    const viz = window.Viz ? new Viz() : null;
 
     function closeViewer() {
       viewer.classList.remove('open');
       viewerImage.src = '';
+      viewerImage.style.display = 'block';
+      viewerSvg.style.display = 'none';
+      viewerSvg.innerHTML = '';
       viewerTitle.textContent = 'Diagram';
+    }
+
+    async function renderDot(dotText, title) {
+      if (!viz) {
+        alert('DOT rendering requires Viz.js. Ensure the report can reach cdn.jsdelivr.net.');
+        return;
+      }
+      viewerTitle.textContent = title || 'Diagram';
+      viewerImage.style.display = 'none';
+      viewerSvg.style.display = 'block';
+      viewerSvg.innerHTML = '<div class="small">Rendering diagram…</div>';
+      try {
+        const svg = await viz.renderSVGElement(dotText);
+        viewerSvg.innerHTML = '';
+        viewerSvg.appendChild(svg);
+        viewer.classList.add('open');
+      } catch (err) {
+        viewerSvg.innerHTML = '<div class="small">Unable to render DOT: ' + err + '</div>';
+        viewer.classList.add('open');
+      }
     }
 
     document.querySelectorAll('a[data-viewer="image"]').forEach(link => {
@@ -1427,8 +1498,24 @@ function Write-Report {
         event.preventDefault();
         const file = link.getAttribute('data-file') || link.getAttribute('href');
         viewerImage.src = file;
+        viewerImage.style.display = 'block';
+        viewerSvg.style.display = 'none';
+        viewerSvg.innerHTML = '';
         viewerTitle.textContent = file;
         viewer.classList.add('open');
+      });
+    });
+
+    document.querySelectorAll('a[data-viewer="dot"]').forEach(link => {
+      link.addEventListener('click', event => {
+        event.preventDefault();
+        const dotId = link.getAttribute('data-dotid');
+        const dotBlock = document.querySelector('#' + dotId + ' pre');
+        if (!dotBlock) {
+          alert('DOT content not found for ' + dotId);
+          return;
+        }
+        renderDot(dotBlock.textContent, dotId);
       });
     });
 
@@ -1448,38 +1535,55 @@ function Write-Report {
 # ---------------------------
 # Main
 # ---------------------------
+$log = New-LogContext
+Write-StageStart -Context $log -Message "NetScaler migration inventory starting"
+
 # Normalize OutDir for predictable behavior
+Write-StageStart -Context $log -Message "Normalizing output directory"
 try {
   $OutDir = (Resolve-Path -LiteralPath $OutDir -ErrorAction Stop).Path
 } catch {
   $OutDir = Join-Path (Get-Location).Path $OutDir
 }
+Write-StageComplete -Context $log -Message "Output directory ready: $OutDir"
 
+Write-StageStart -Context $log -Message "Preparing report directories"
 Ensure-Dir $OutDir
 $reportBaseName = $VPXName
 $reportDir = Join-Path $OutDir $VPXName
 Ensure-Dir $reportDir
+Write-StageComplete -Context $log -Message "Report directory: $reportDir"
 
 $models = @()
+Write-StageStart -Context $log -Message "Parsing configuration file: $ConfigFile"
 $models += Parse-NsConfigFile -FilePath $ConfigFile
 if (@($models).Count -eq 0) {
   throw "No configuration models were parsed from $ConfigFile."
 }
 $cm = $models[0]
+$parsedCount = @($models).Count
+Write-StageComplete -Context $log -Message "Parsed $parsedCount configuration model(s)"
 $perFileDir = Join-Path $reportDir "PerFile"
 $combinedDir = Join-Path $reportDir "Combined"
 Ensure-Dir $perFileDir
 Ensure-Dir $combinedDir
 $indexRows = @()
 
+Write-StageStart -Context $log -Message "Locating Graphviz dot.exe (if available)"
 $dotExe = Find-DotExe -override $DotExePath
 $renderWarn = @()
+if ($dotExe) {
+  Write-StageComplete -Context $log -Message "Graphviz detected: $dotExe"
+} else {
+  Write-StageComplete -Context $log -Message "Graphviz not found; DOT output only"
+}
 
 foreach ($m in $models) {
   $name = [IO.Path]::GetFileNameWithoutExtension($m.File)
   $dir  = Join-Path $perFileDir $name
   Ensure-Dir $dir
 
+  Write-StageStart -Context $log -Message "Building per-file report assets: $name"
   $csFlows   = Get-CsFlows -m $m
   if ($null -eq $csFlows) { $csFlows = @() }
   $respTable = Get-ResponderTable -m $m
@@ -1495,24 +1599,34 @@ foreach ($m in $models) {
   $flowGraphic = $null
 
   if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
+    Write-StageStart -Context $log -Message "Rendering flow diagram ($GraphFormat) for $name"
     $flowGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $flowDot -Format $GraphFormat
+    if ($flowGraphic) {
+      Write-StageComplete -Context $log -Message "Rendered flow diagram for $name"
+    } else {
+      Write-StageComplete -Context $log -Message "Flow render skipped/failed for $name"
+    }
     if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
   }
 
   $flowDotContent = if ($flowDot -and (Test-Path -LiteralPath $flowDot)) { Get-Content -LiteralPath $flowDot -Raw } else { "" }
+  Write-StageStart -Context $log -Message "Writing per-file report: $name"
   $report = Write-Report -m $m -baseName $name -dir $dir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -flowDot $flowDot -flowGraphic $flowGraphic -flowDotContent $flowDotContent
+  Write-StageComplete -Context $log -Message "Per-file report ready: $report"
 
   $indexRows += [pscustomobject]@{
     File       = $m.File
     ReportHtml = $report
     Flow       = if ($flowGraphic) { $flowGraphic } else { $flowDot }
   }
+  Write-StageComplete -Context $log -Message "Per-file assets completed for $name"
 }
 foreach ($p in $cm.CsPolicy.Keys)        { if ($cm.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedCsAction" $cm.CsPolicy[$p].action } }
 foreach ($p in $cm.ResponderPolicy.Keys) { if ($cm.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedResponderAction" $cm.ResponderPolicy[$p].action } }
 foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $cm "UsedRewriteAction" $cm.RewritePolicy[$p].action } }
 
 $combinedName = "ALL"
+Write-StageStart -Context $log -Message "Building combined report assets"
 $csFlowsC   = Get-CsFlows -m $cm
 if ($null -eq $csFlowsC) { $csFlowsC = @() }
 $respTableC = Get-ResponderTable -m $cm
@@ -1525,6 +1639,7 @@ $straysC    = Get-StrayArtifacts -m $cm
 if ($null -eq $straysC) { $straysC = @() }
 $flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
 $flowGraphicC = $null
+Write-StageComplete -Context $log -Message "Combined report assets built"
 
 $m = $cm
 $csFlows = $csFlowsC
@@ -1532,17 +1647,25 @@ $respTable = $respTableC
 $rwTable = $rwTableC
 $backend = $backendC
 $strays = $straysC
+Write-StageStart -Context $log -Message "Generating entry point diagrams"
 $entrypoints = Get-EntryPoints -m $cm
 if ($null -eq $entrypoints) { $entrypoints = @() }
 
 $entrypointFlowItems = @()
 foreach ($ep in @($entrypoints)) {
+  Write-StageNote -Context $log -Message ("Entry point: {0} {1}" -f $ep.Type, $ep.Name)
   $safeName = Get-SafeFileName -Name ("{0}_{1}" -f $ep.Type, $ep.Name)
   $entryBase = $safeName
   $epDot = Write-EntryPointFlowDot -m $m -entrypoint $ep -baseName $entryBase -dir $reportDir -csFlows $csFlows
   $epGraphic = $null
   if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
+    Write-StageStart -Context $log -Message ("Rendering entry point diagram ($GraphFormat): {0} {1}" -f $ep.Type, $ep.Name)
     $epGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $epDot -Format $GraphFormat
+    if ($epGraphic) {
+      Write-StageComplete -Context $log -Message ("Rendered entry point diagram: {0} {1}" -f $ep.Type, $ep.Name)
+    } else {
+      Write-StageComplete -Context $log -Message ("Entry point render skipped/failed: {0} {1}" -f $ep.Type, $ep.Name)
+    }
     if (-not $epGraphic) { $renderWarn += "Render failed: $epDot" }
   }
   $dotId = "dot-entrypoint-{0}" -f (Get-SafeFileName -Name $entryBase)
@@ -1567,12 +1690,20 @@ foreach ($ep in @($entrypoints)) {
     }
   }
 }
+Write-StageComplete -Context $log -Message ("Entry point diagrams complete ({0})" -f @($entrypoints).Count)
 
 $flowBase = "{0}_Flow" -f (Get-SafeFileName -Name $reportBaseName)
+Write-StageStart -Context $log -Message "Generating overall flow diagram"
 $flowDot = Write-FullFlowDot -m $m -baseName $flowBase -dir $reportDir -csFlows $csFlows
 $flowGraphic = $null
 if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
+  Write-StageStart -Context $log -Message "Rendering overall flow diagram ($GraphFormat)"
   $flowGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $flowDot -Format $GraphFormat
+  if ($flowGraphic) {
+    Write-StageComplete -Context $log -Message "Rendered overall flow diagram"
+  } else {
+    Write-StageComplete -Context $log -Message "Overall flow render skipped/failed"
+  }
   if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
 }
 $flowGraphicName = if ($flowGraphic) { [IO.Path]::GetFileName($flowGraphic) } else { $null }
@@ -1580,7 +1711,9 @@ $flowDotName = [IO.Path]::GetFileName($flowDot)
 $flowDotContent = if ($flowDot -and (Test-Path -LiteralPath $flowDot)) { Get-Content -LiteralPath $flowDot -Raw } else { "" }
 
 $reportFileName = "{0}_ConfigurationReport.html" -f $reportBaseName
+Write-StageStart -Context $log -Message "Writing combined migration report"
 $report = Write-Report -m $m -reportTitle $VPXName -baseName $reportBaseName -reportFileName $reportFileName -dir $reportDir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -entrypoints $entrypoints -entrypointFlowItems $entrypointFlowItems -flowDot $flowDotName -flowGraphic $flowGraphicName -flowDotContent $flowDotContent
+Write-StageComplete -Context $log -Message "Combined report ready: $report"
 
 if (@($renderWarn).Count -gt 0) {
   Write-Warning ("Graph render warnings:`r`n" + ($renderWarn -join "`r`n"))
@@ -1588,3 +1721,4 @@ if (@($renderWarn).Count -gt 0) {
 
 Write-Host ("Report directory: {0}" -f $reportDir)
 Write-Host ("Report: {0}" -f (Join-Path $reportDir $reportFileName))
+Write-StageComplete -Context $log -Message "NetScaler migration inventory complete"
