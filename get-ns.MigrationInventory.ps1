@@ -3,14 +3,14 @@
   NetScaler migration-focused inventory (PowerShell 5.1).
 
 .DESCRIPTION
-  Produces reports that explain “what it does” instead of dumping every object:
+  Produces reports that explain "what it does" instead of dumping every object:
     - CS routing flows: CS vServer -> CS policies -> CS actions -> target LB vServer
     - Responder behavior: bound policy -> rule -> action -> action definition (type + parameters)
     - Rewrite behavior: bound policy -> rule -> action -> action definition (type + parameters)
     - Backend mapping: LB vServer -> serviceGroup/service -> members -> monitors
     - Global bindings clearly called out
 
-  Also flags “stray artifacts” for review:
+  Also flags "stray artifacts" for review:
     - Defined but never referenced/bound (likely unused)
     - Referenced but not defined (missing in provided config set)
     - Actions/policies defined but not bound anywhere
@@ -138,7 +138,7 @@ function Write-StageStart {
   $Context.StepCount++
   $Context.LastStep = Get-Date
   $stamp = $Context.LastStep.ToString("HH:mm:ss")
-  Write-Host ("[{0}] ▶ {1}" -f $stamp, $Message) -ForegroundColor Cyan
+  Write-Host ("[{0}] >> {1}" -f $stamp, $Message) -ForegroundColor Cyan
 }
 
 function Write-StageComplete {
@@ -150,7 +150,7 @@ function Write-StageComplete {
   $elapsed = $now - $Context.LastStep
   $total = $now - $Context.Start
   $stamp = $now.ToString("HH:mm:ss")
-  Write-Host ("[{0}] ✔ {1} ({2:N1}s, total {3:N1}s)" -f $stamp, $Message, $elapsed.TotalSeconds, $total.TotalSeconds) -ForegroundColor Green
+  Write-Host ("[{0}] OK {1} ({2:N1}s, total {3:N1}s)" -f $stamp, $Message, $elapsed.TotalSeconds, $total.TotalSeconds) -ForegroundColor Green
 }
 
 function Write-StageNote {
@@ -159,7 +159,7 @@ function Write-StageNote {
     [Parameter(Mandatory=$true)][string]$Message
   )
   $stamp = (Get-Date).ToString("HH:mm:ss")
-  Write-Host ("[{0}] ℹ {1}" -f $stamp, $Message) -ForegroundColor Yellow
+  Write-Host ("[{0}] INFO {1}" -f $stamp, $Message) -ForegroundColor Yellow
 }
 
 function Render-GraphSafe {
@@ -251,7 +251,7 @@ function New-NsModel {
     #  - LB vServer binds backend target (svc/sg)
     #  - serviceGroup members, monitors, etc.
 
-    # Reference tracking for “stray artifact” detection
+    # Reference tracking for "stray artifact" detection
     Refs = @{
       UsedCsPolicy=@{}
       UsedCsAction=@{}
@@ -623,7 +623,7 @@ function Parse-NsConfigFile {
 }
 
 # ---------------------------
-# Build “meaningful views”
+# Build "meaningful views"
 # ---------------------------
 function Get-CsFlows {
   param([Parameter(Mandatory=$true)]$m)
@@ -1185,6 +1185,24 @@ function Write-FlowDot {
 # ---------------------------
 # HTML report writer (migration-centric)
 # ---------------------------
+function ConvertTo-ReportTable {
+  param(
+    $Data,
+    [string]$Title,
+    [string]$Id
+  )
+  if ($null -eq $Data) { $Data = @() }
+  $count = @($Data).Count
+  if ($count -eq 0) {
+    return "<div class=""empty-state"">No data available.</div>"
+  }
+  $safeTitle = if ($Title) { [System.Net.WebUtility]::HtmlEncode($Title) } else { "" }
+  $idAttr = if ($Id) { " id=""$Id""" } else { "" }
+  $tableHtml = @($Data) | ConvertTo-Html -Fragment
+  $tableHtml = $tableHtml -replace "<table>", "<table class=""report-table"" data-title=""$safeTitle""$idAttr>"
+  return "<div class=""table-block""><div class=""table-meta"">$count rows</div>$tableHtml</div>"
+}
+
 function Write-Report {
   param(
     [Parameter(Mandatory=$true)]$m,
@@ -1262,6 +1280,27 @@ function Write-Report {
     [pscustomobject]@{ Label="Stray Artifacts"; Value=$summary.StrayArtifacts }
   )
 
+  $riskCards = @(
+    [pscustomobject]@{
+      Label = "Missing Definitions"
+      Value = $summary.MissingDefinitions
+      Tone = if ($summary.MissingDefinitions -gt 0) { "warn" } else { "ok" }
+      Note = "Referenced but not defined"
+    },
+    [pscustomobject]@{
+      Label = "Unused Definitions"
+      Value = $summary.UnusedDefinitions
+      Tone = if ($summary.UnusedDefinitions -gt 0) { "warn" } else { "ok" }
+      Note = "Defined but not bound"
+    },
+    [pscustomobject]@{
+      Label = "Missing Actions"
+      Value = $summary.MissingActions
+      Tone = if ($summary.MissingActions -gt 0) { "warn" } else { "ok" }
+      Note = "Action referenced but missing"
+    }
+  )
+
   $chartMax = 1
   foreach ($c in $summaryCards) { if ($c.Value -gt $chartMax) { $chartMax = $c.Value } }
   $chartRows = ($summaryCards | ForEach-Object {
@@ -1288,6 +1327,22 @@ function Write-Report {
     "<details id=""$($_.DotId)""><summary>Entry Point DOT: $($_.Type) - $($_.Name)</summary><pre>$encoded</pre></details>"
   })
 
+  $reportDate = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+  $navLinks = @(
+    [pscustomobject]@{ Id="summary"; Label="Summary" },
+    [pscustomobject]@{ Id="entrypoints"; Label="Entry Points" },
+    [pscustomobject]@{ Id="global-bindings"; Label="Global Bindings" },
+    [pscustomobject]@{ Id="overall-flow"; Label="Overall Flow" },
+    [pscustomobject]@{ Id="dot-diagrams"; Label="DOT Diagrams" },
+    [pscustomobject]@{ Id="cs-flows"; Label="CS Flows" },
+    [pscustomobject]@{ Id="responder"; Label="Responder" },
+    [pscustomobject]@{ Id="rewrite"; Label="Rewrite" },
+    [pscustomobject]@{ Id="lb-backends"; Label="LB Backends" },
+    [pscustomobject]@{ Id="service-groups"; Label="Service Groups" },
+    [pscustomobject]@{ Id="strays"; Label="Strays" },
+    [pscustomobject]@{ Id="downloads"; Label="Downloads" }
+  )
+
   $html = @"
 <!doctype html>
 <html>
@@ -1302,7 +1357,7 @@ function Write-Report {
     header h1 { margin: 0 0 6px 0; font-size: 26px; }
     header p { margin: 0; opacity: 0.9; }
     main { padding: 24px 32px 40px; }
-    section { background: #fff; border-radius: 10px; padding: 18px 20px; margin: 0 0 18px 0; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+    section { background: #fff; border-radius: 14px; padding: 18px 20px; margin: 0 0 18px 0; box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08); }
     h2 { margin-top: 0; font-size: 20px; }
     h3 { margin-bottom: 6px; }
     table { border-collapse: collapse; width: 100%; margin: 12px 0 18px 0; }
@@ -1320,6 +1375,26 @@ function Write-Report {
     .badge-link { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #2d7dd2; color: #fff; border-radius: 999px; font-size: 12px; font-weight: 600; text-decoration: none; }
     .badge-link:hover { background: #1f5ea8; }
     .badge-link:focus { outline: 2px solid #0a4ea3; outline-offset: 2px; }
+    .hero { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; justify-content: space-between; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 10px; }
+    .meta-card { background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.35); border-radius: 12px; padding: 10px 12px; min-width: 140px; }
+    .meta-card span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.8; }
+    .meta-card strong { font-size: 16px; }
+    .nav-bar { position: sticky; top: 0; background: #f7f9fc; z-index: 50; padding: 12px 32px; border-bottom: 1px solid #e4e7eb; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .nav-link { background: #fff; border: 1px solid #e4e7eb; border-radius: 999px; padding: 6px 12px; text-decoration: none; color: #1b1f23; font-size: 12px; font-weight: 600; }
+    .nav-link:hover { border-color: #2d7dd2; color: #2d7dd2; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 14px; }
+    .toolbar input { border-radius: 999px; border: 1px solid #cbd5e1; padding: 6px 14px; min-width: 240px; }
+    .risk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 12px; }
+    .risk-card { border-radius: 12px; padding: 12px 14px; border: 1px solid #e2e8f0; background: #f8fafc; }
+    .risk-card.warn { border-color: #f5c2c7; background: #fff5f5; }
+    .risk-card.ok { border-color: #bbf7d0; background: #f0fdf4; }
+    .risk-card span { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: #4b5563; }
+    .risk-card strong { display: block; font-size: 18px; margin-top: 4px; }
+    .risk-card small { color: #6b7280; }
+    .table-block { margin-top: 10px; }
+    .table-meta { font-size: 12px; color: #6b7280; margin-bottom: 6px; }
+    .empty-state { padding: 16px; border-radius: 12px; background: #f8fafc; border: 1px dashed #cbd5e1; color: #64748b; }
     #image-viewer { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.7); display: none; align-items: center; justify-content: center; z-index: 9999; padding: 24px; }
     #image-viewer.open { display: flex; }
     #image-viewer .viewer-card { background: #fff; border-radius: 12px; max-width: 96vw; max-height: 92vh; width: min(1100px, 96vw); display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
@@ -1334,9 +1409,26 @@ function Write-Report {
 </head>
 <body>
   <header>
-    <h1>$reportTitle - Migration Readiness Report</h1>
-    <p>Source configuration: $($m.File)</p>
+    <div class="hero">
+      <div>
+        <h1>$reportTitle - Migration Readiness Report</h1>
+        <p>Source configuration: $($m.File)</p>
+        <div class="toolbar">
+          <input id="global-filter" type="search" placeholder="Filter tables by any text...">
+          <span id="filter-count" class="small"></span>
+        </div>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-card"><span>Generated</span><strong>$reportDate</strong></div>
+        <div class="meta-card"><span>Entry Points</span><strong>$($summary.Entrypoints)</strong></div>
+        <div class="meta-card"><span>LB Backends</span><strong>$($summary.LbBackends)</strong></div>
+      </div>
+    </div>
   </header>
+
+  <nav class="nav-bar">
+    $((@($navLinks) | ForEach-Object { "<a class=""nav-link"" href=""#$($_.Id)"">$($_.Label)</a>" }) -join "`r`n")
+  </nav>
   <main>
 
   <section class="callout">
@@ -1350,7 +1442,7 @@ function Write-Report {
     </ul>
   </section>
 
-  <section>
+  <section id="summary">
     <h2>Migration Summary</h2>
     <p class="small">Use this section to quickly spot scope and potential cleanup needs.</p>
     <div class="grid">
@@ -1359,31 +1451,35 @@ function Write-Report {
     <div style="margin-top:12px;">
       $chartRows
     </div>
+    <div class="risk-grid">
+      $((@($riskCards) | ForEach-Object { "<div class=""risk-card $($_.Tone)""><span>$($_.Label)</span><strong>$($_.Value)</strong><small>$($_.Note)</small></div>" }) -join "`r`n")
+    </div>
   </section>
 
-  <section>
+  <section id="entrypoints">
     <h2>Entry Points</h2>
-    $((@($entrypointRows) | ConvertTo-Html -Fragment -PreContent "<div class=""small"">Entry-point diagrams show the policy/backend flow tied to each ingress.</div>"))
+    <div class="small">Entry-point diagrams show the policy/backend flow tied to each ingress.</div>
+    $(ConvertTo-ReportTable -Data $entrypointRows -Title "Entry Points")
     <ul>
-      $($entrypointLinks -join "`r`n")
+      $(if (@($entrypointLinks).Count -gt 0) { $entrypointLinks -join "`r`n" } else { "<li class=""small"">No entry point diagrams generated.</li>" })
     </ul>
   </section>
 
-  <section>
+  <section id="global-bindings">
     <h2>Global Bindings (High Impact)</h2>
     <p class="small">These policies can affect broad traffic scope. Validate intent before migrating.</p>
     <h3>Responder (global)</h3>
-    $((@($globResp) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data ($globResp | Select-Object Priority, PolicyName, BindType, Extra) -Title "Global Responder Bindings")
     <h3>Rewrite (global)</h3>
-    $((@($globRw) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data ($globRw | Select-Object Priority, PolicyName, BindType, Extra) -Title "Global Rewrite Bindings")
   </section>
 
-  <section class="links">
+  <section id="overall-flow" class="links">
     <h2>Overall Flow Diagram</h2>
     $flowLink
   </section>
 
-  <section>
+  <section id="dot-diagrams">
     <h2>DOT Diagrams (Embedded)</h2>
     <p class="small">DOT content is embedded below to keep the report self-contained.</p>
     <details id="dot-overall-flow">
@@ -1393,41 +1489,41 @@ function Write-Report {
     $($entrypointDotBlocks -join "`r`n")
   </section>
 
-  <section>
-    <h2>CS Routing Flows (CS vServer → Policy → Action → Target LB vServer)</h2>
-    <p class="small">This is the core “where does traffic go?” view.</p>
-    $((@($csFlows) | ConvertTo-Html -Fragment))
+  <section id="cs-flows">
+    <h2>CS Routing Flows (CS vServer -> Policy -> Action -> Target LB vServer)</h2>
+    <p class="small">This is the core "where does traffic go?" view.</p>
+    $(ConvertTo-ReportTable -Data $csFlows -Title "CS Routing Flows")
   </section>
 
-  <section>
-    <h2>Responder (Bound Policy → Rule → Action Definition)</h2>
+  <section id="responder">
+    <h2>Responder (Bound Policy -> Rule -> Action Definition)</h2>
     <p class="small">This section explains what responder policies do by pairing policies with their actions.</p>
-    $((@($respTable) | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data $respTable -Title "Responder Bindings")
   </section>
 
-  <section>
-    <h2>Rewrite (Bound Policy → Rule → Action Definition)</h2>
+  <section id="rewrite">
+    <h2>Rewrite (Bound Policy -> Rule -> Action Definition)</h2>
     <p class="small">This section explains rewrite behavior by pairing policies with actions.</p>
-    $((@($rwTable) | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data $rwTable -Title "Rewrite Bindings")
   </section>
 
-  <section>
-    <h2>LB Backends (LB vServer → Backend target)</h2>
-    $((@($backend.LbToBackend) | ConvertTo-Html -Fragment))
+  <section id="lb-backends">
+    <h2>LB Backends (LB vServer -> Backend target)</h2>
+    $(ConvertTo-ReportTable -Data $backend.LbToBackend -Title "LB Backends")
   </section>
 
-  <section>
+  <section id="service-groups">
     <h2>Service Group Expansion (Members + Monitors)</h2>
-    $((@($backend.ServiceGroupExpansion) | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data $backend.ServiceGroupExpansion -Title "Service Group Expansion")
   </section>
 
-  <section>
+  <section id="strays">
     <h2>Stray Artifacts (Review Candidates)</h2>
     <p class="small">Likely unused, or missing from the provided config set. Confirm before migrating.</p>
-    $((@($strays) | ConvertTo-Html -Fragment))
+    $(ConvertTo-ReportTable -Data $strays -Title "Stray Artifacts")
   </section>
 
-  <section>
+  <section id="downloads">
     <h2>Downloads</h2>
     <div class="links">
       <a class="badge-link" href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a>
@@ -1445,7 +1541,7 @@ function Write-Report {
     <div class="viewer-card">
       <header>
         <strong id="viewer-title">Diagram</strong>
-        <button type="button" id="viewer-close" aria-label="Close">✕</button>
+        <button type="button" id="viewer-close" aria-label="Close">x</button>
       </header>
       <div class="viewer-body">
         <img id="viewer-image" alt="Diagram preview">
@@ -1457,6 +1553,8 @@ function Write-Report {
   <script src="https://cdn.jsdelivr.net/npm/viz.js@2.1.2/viz.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/viz.js@2.1.2/full.render.js"></script>
   <script>
+    const filterInput = document.getElementById('global-filter');
+    const filterCount = document.getElementById('filter-count');
     const viewer = document.getElementById('image-viewer');
     const viewerImage = document.getElementById('viewer-image');
     const viewerSvg = document.getElementById('viewer-svg');
@@ -1481,7 +1579,7 @@ function Write-Report {
       viewerTitle.textContent = title || 'Diagram';
       viewerImage.style.display = 'none';
       viewerSvg.style.display = 'block';
-      viewerSvg.innerHTML = '<div class="small">Rendering diagram…</div>';
+      viewerSvg.innerHTML = '<div class="small">Rendering diagram...</div>';
       try {
         const svg = await viz.renderSVGElement(dotText);
         viewerSvg.innerHTML = '';
@@ -1523,6 +1621,35 @@ function Write-Report {
     viewer.addEventListener('click', event => {
       if (event.target === viewer) { closeViewer(); }
     });
+
+    function applyFilter() {
+      if (!filterInput) { return; }
+      const term = filterInput.value.toLowerCase().trim();
+      let totalMatches = 0;
+      document.querySelectorAll('table.report-table').forEach(table => {
+        const rows = table.querySelectorAll('tbody tr');
+        let visibleRows = 0;
+        rows.forEach(row => {
+          const text = row.textContent.toLowerCase();
+          const isMatch = term === '' || text.includes(term);
+          row.style.display = isMatch ? '' : 'none';
+          if (isMatch) { visibleRows += 1; }
+        });
+        const meta = table.closest('.table-block')?.querySelector('.table-meta');
+        if (meta) {
+          meta.textContent = term ? `Showing ${visibleRows} of ${rows.length} rows` : `${rows.length} rows`;
+        }
+        totalMatches += visibleRows;
+      });
+      if (filterCount) {
+        filterCount.textContent = term ? `Matches: ${totalMatches}` : '';
+      }
+    }
+
+    if (filterInput) {
+      filterInput.addEventListener('input', applyFilter);
+      applyFilter();
+    }
   </script>
 </body>
 </html>
