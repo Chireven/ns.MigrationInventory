@@ -138,7 +138,7 @@ function Write-StageStart {
   $Context.StepCount++
   $Context.LastStep = Get-Date
   $stamp = $Context.LastStep.ToString("HH:mm:ss")
-  Write-Host ("[{0}] START: {1}" -f $stamp, $Message) -ForegroundColor Cyan
+  Write-Host ("[{0}] ▶ {1}" -f $stamp, $Message) -ForegroundColor Cyan
 }
 
 function Write-StageComplete {
@@ -150,7 +150,7 @@ function Write-StageComplete {
   $elapsed = $now - $Context.LastStep
   $total = $now - $Context.Start
   $stamp = $now.ToString("HH:mm:ss")
-  Write-Host ("[{0}] DONE: {1} ({2:N1}s, total {3:N1}s)" -f $stamp, $Message, $elapsed.TotalSeconds, $total.TotalSeconds) -ForegroundColor Green
+  Write-Host ("[{0}] ✔ {1} ({2:N1}s, total {3:N1}s)" -f $stamp, $Message, $elapsed.TotalSeconds, $total.TotalSeconds) -ForegroundColor Green
 }
 
 function Write-StageNote {
@@ -159,7 +159,7 @@ function Write-StageNote {
     [Parameter(Mandatory=$true)][string]$Message
   )
   $stamp = (Get-Date).ToString("HH:mm:ss")
-  Write-Host ("[{0}] INFO: {1}" -f $stamp, $Message) -ForegroundColor Yellow
+  Write-Host ("[{0}] ℹ {1}" -f $stamp, $Message) -ForegroundColor Yellow
 }
 
 function Render-GraphSafe {
