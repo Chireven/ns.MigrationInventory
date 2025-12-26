@@ -1,0 +1,1114 @@
+<#
+.SYNOPSIS
+  NetScaler migration-focused inventory (PowerShell 5.1).
+
+.DESCRIPTION
+  Produces reports that explain “what it does” instead of dumping every object:
+    - CS routing flows: CS vServer -> CS policies -> CS actions -> target LB vServer
+    - Responder behavior: bound policy -> rule -> action -> action definition (type + parameters)
+    - Rewrite behavior: bound policy -> rule -> action -> action definition (type + parameters)
+    - Backend mapping: LB vServer -> serviceGroup/service -> members -> monitors
+    - Global bindings clearly called out
+
+  Also flags “stray artifacts” for review:
+    - Defined but never referenced/bound (likely unused)
+    - Referenced but not defined (missing in provided config set)
+    - Actions/policies defined but not bound anywhere
+
+  DOT flow files are generated (Graphviz-safe UTF-8 without BOM). Rendering is optional.
+
+.NOTES
+  - Regex parser of common NetScaler CLI config lines.
+  - Works best on full exported configs (ns.conf + included confs).
+
+.PARAMETER ConfigFiles
+  One or more config file paths.
+
+.PARAMETER OutDir
+  Output directory.
+
+.PARAMETER GraphFormat
+  dot|svg|png (DOT always written; svg/png only if Graphviz dot.exe works)
+
+.PARAMETER DotExePath
+  Optional explicit path to dot.exe
+
+.PARAMETER SkipGraphRender
+  Skip SVG/PNG rendering even if dot.exe exists.
+
+.EXAMPLE
+  .\get-nsMigrationOverview.ps1 -ConfigFiles "C:\repo\ns\*.conf" -OutDir "C:\temp\ns\report" -GraphFormat svg
+#>
+
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory=$true)]
+  [ValidateNotNullOrEmpty()]
+  [string[]]$ConfigFiles,
+
+  [Parameter(Mandatory=$true)]
+  [ValidateNotNullOrEmpty()]
+  [string]$OutDir,
+
+  [ValidateSet('dot','svg','png')]
+  [string]$GraphFormat = 'dot',
+
+  [string]$DotExePath,
+
+  [switch]$SkipGraphRender
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+trap {
+  Write-Host "ERROR at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
+  Write-Host "Line: $($_.InvocationInfo.Line)"
+  break
+}
+
+# ---------------------------
+# Helpers
+# ---------------------------
+function Ensure-Dir {
+  param([Parameter(Mandatory=$true)][string]$Path)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+  }
+}
+
+function Out-FileUtf8NoBom {
+  param(
+    [Parameter(Mandatory=$true)][string]$Path,
+    [Parameter(Mandatory=$true)][string]$Content
+  )
+  $parent = Split-Path -Parent $Path
+  if ($parent -and (-not (Test-Path -LiteralPath $parent))) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
+
+function Find-DotExe {
+  param([string]$override)
+  if ($override -and (Test-Path -LiteralPath $override)) { return $override }
+
+  $cmd = Get-Command dot -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
+
+  $candidates = @(
+    "$env:ProgramFiles\Graphviz\bin\dot.exe",
+    "$env:ProgramFiles(x86)\Graphviz\bin\dot.exe"
+  ) | Where-Object { Test-Path -LiteralPath $_ }
+
+  if (@($candidates).Count -gt 0) { return @($candidates)[0] }
+  return $null
+}
+
+function Render-GraphSafe {
+  param(
+    [Parameter(Mandatory=$true)][string]$DotExe,
+    [Parameter(Mandatory=$true)][string]$DotPath,
+    [Parameter(Mandatory=$true)][string]$Format
+  )
+  try {
+    $outPath = [System.IO.Path]::ChangeExtension($DotPath, $Format)
+    & $DotExe ("-T{0}" -f $Format) $DotPath ("-o{0}" -f $outPath) 2>$null | Out-Null
+    if (Test-Path -LiteralPath $outPath) { return $outPath }
+    return $null
+  } catch {
+    return $null
+  }
+}
+
+function Read-NsConfigLines {
+  param([Parameter(Mandatory=$true)][string]$Path)
+
+  $raw = Get-Content -LiteralPath $Path -ErrorAction Stop
+
+  $joined = New-Object System.Collections.Generic.List[string]
+  $buffer = ""
+
+  foreach ($line in $raw) {
+    $l = ($line + "").Trim()
+    if ($l.Length -eq 0) { continue }
+    if ($l.StartsWith("#")) { continue }
+
+    # best-effort inline comment strip " # ..."
+    $hash = $l.IndexOf(" #")
+    if ($hash -gt 0) { $l = $l.Substring(0, $hash).Trim() }
+
+    # join trailing "\" continuations
+    if ($l.EndsWith("\")) {
+      $buffer += ($l.TrimEnd("\").Trim() + " ")
+      continue
+    }
+
+    $buffer += $l
+    $joined.Add($buffer.Trim())
+    $buffer = ""
+  }
+
+  if ($buffer.Trim().Length -gt 0) { $joined.Add($buffer.Trim()) }
+  return $joined
+}
+
+function New-NsModel {
+  # Definitions
+  [ordered]@{
+    File = $null
+
+    # Core objects
+    CsVserver    = @{}  # name -> @{ proto; vip; port; raw }
+    LbVserver    = @{}  # name -> @{ proto; vip; port; raw }
+    Server       = @{}  # name -> addr
+    ServiceGroup = @{}  # name -> proto
+    Service      = @{}  # name -> @{ server; proto; port }
+    Monitor      = @{}  # name -> type
+    SslCertKey   = @{}  # name -> @{ cert; key }
+
+    # CS logic
+    CsAction     = @{}  # name -> @{ targetLbVserver }
+    CsPolicy     = @{}  # name -> @{ rule; action }
+    CsPolicyLabel= @{}  # name -> @{ }
+
+    # Responder logic
+    ResponderAction = @{} # name -> @{ type; params }
+    ResponderPolicy = @{} # name -> @{ rule; action }
+
+    # Rewrite logic
+    RewriteAction = @{}   # name -> @{ type; params }
+    RewritePolicy = @{}   # name -> @{ rule; action }
+
+    # Policy data
+    Patset  = @{}         # name -> $true
+    Dataset = @{}         # name -> $true
+
+    # Bindings (normalized)
+    Bindings = @()        # objects: @{ TargetType; TargetName; Feature; PolicyName; Priority; BindType; Extra }
+    # Examples:
+    #  - CS vServer binds CS policy
+    #  - LB/CS vServer binds responder policy (type=RESPONSE)
+    #  - Global binds responder/rewrite
+    #  - CS vServer binds policyLabel; policyLabel binds CS policy
+    #  - LB vServer binds backend target (svc/sg)
+    #  - serviceGroup members, monitors, etc.
+
+    # Reference tracking for “stray artifact” detection
+    Refs = @{
+      UsedCsPolicy=@{}
+      UsedCsAction=@{}
+      UsedCsPolicyLabel=@{}
+      UsedResponderPolicy=@{}
+      UsedResponderAction=@{}
+      UsedRewritePolicy=@{}
+      UsedRewriteAction=@{}
+      UsedLbVserver=@{}
+      UsedServiceGroup=@{}
+      UsedService=@{}
+      UsedServer=@{}
+      UsedMonitor=@{}
+      UsedCertKey=@{}
+    }
+  }
+}
+
+function Mark-Ref {
+  param(
+    [Parameter(Mandatory=$true)]$model,
+    [Parameter(Mandatory=$true)][string]$bucket,
+    [Parameter(Mandatory=$true)][string]$name
+  )
+  if (-not $name) { return }
+  $model.Refs[$bucket][$name] = $true
+}
+
+function Parse-RuleBetween {
+  # Extracts text between -rule and -action (or end)
+  param(
+    [Parameter(Mandatory=$true)][string]$line,
+    [Parameter(Mandatory=$true)][string]$startToken,
+    [Parameter(Mandatory=$true)][string]$endToken
+  )
+  $si = $line.IndexOf($startToken)
+  if ($si -lt 0) { return "" }
+  $si += $startToken.Length
+  $ei = $line.IndexOf($endToken, $si)
+  if ($ei -lt 0) {
+    return ($line.Substring($si).Trim())
+  }
+  return ($line.Substring($si, $ei - $si).Trim())
+}
+
+function Parse-NsConfigFile {
+  param([Parameter(Mandatory=$true)][string]$FilePath)
+
+  $m = New-NsModel
+  $m.File = (Resolve-Path -LiteralPath $FilePath).Path
+
+  $lines = Read-NsConfigLines -Path $FilePath
+
+  foreach ($l in $lines) {
+
+    # -------------------
+    # Definitions
+    # -------------------
+    if ($l -match '^\s*add\s+cs\s+vserver\s+(?<name>\S+)\s+(?<proto>\S+)\s+(?<vip>\S+)\s+(?<port>\d+)\b') {
+      $m.CsVserver[$Matches.name] = @{ proto=$Matches.proto; vip=$Matches.vip; port=[int]$Matches.port; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+lb\s+vserver\s+(?<name>\S+)\s+(?<proto>\S+)\s+(?<vip>\S+)\s+(?<port>\d+)\b') {
+      $m.LbVserver[$Matches.name] = @{ proto=$Matches.proto; vip=$Matches.vip; port=[int]$Matches.port; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+server\s+(?<name>\S+)\s+(?<addr>\S+)\b') {
+      $m.Server[$Matches.name] = $Matches.addr
+      continue
+    }
+
+    if ($l -match '^\s*add\s+serviceGroup\s+(?<name>\S+)\s+(?<proto>\S+)\b') {
+      $m.ServiceGroup[$Matches.name] = @{ proto=$Matches.proto; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+service\s+(?<name>\S+)\s+(?<server>\S+)\s+(?<proto>\S+)\s+(?<port>\d+)\b') {
+      $m.Service[$Matches.name] = @{ server=$Matches.server; proto=$Matches.proto; port=[int]$Matches.port; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+lb\s+monitor\s+(?<name>\S+)\s+(?<type>\S+)\b') {
+      $m.Monitor[$Matches.name] = @{ type=$Matches.type; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+ssl\s+certKey\s+(?<name>\S+)\s+-cert\s+(?<cert>\S+)\s+-key\s+(?<key>\S+)\b') {
+      $m.SslCertKey[$Matches.name] = @{ cert=$Matches.cert; key=$Matches.key; raw=$l }
+      continue
+    }
+
+    # CS
+    if ($l -match '^\s*add\s+cs\s+action\s+(?<name>\S+)\s+-targetLBVserver\s+(?<lb>\S+)\b') {
+      $m.CsAction[$Matches.name] = @{ targetLbVserver=$Matches.lb; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+cs\s+policy\s+(?<name>\S+)\s+-rule\s+.+\s+-action\s+(?<action>\S+)\b') {
+      $rule = Parse-RuleBetween -line $l -startToken "-rule" -endToken "-action"
+      $m.CsPolicy[$Matches.name] = @{ rule=$rule; action=$Matches.action; raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+cs\s+policylabel\s+(?<name>\S+)\b') {
+      $m.CsPolicyLabel[$Matches.name] = @{ raw=$l }
+      continue
+    }
+
+    # Responder
+    if ($l -match '^\s*add\s+responder\s+action\s+(?<name>\S+)\s+(?<type>\S+)\b(?<rest>.*)$') {
+      $m.ResponderAction[$Matches.name] = @{ type=$Matches.type; params=($Matches.rest.Trim()); raw=$l }
+      continue
+    }
+
+    if ($l -match '^\s*add\s+responder\s+policy\s+(?<name>\S+)\s+-rule\s+.+\s+-action\s+(?<action>\S+)\b') {
+      $rule = Parse-RuleBetween -line $l -startToken "-rule" -endToken "-action"
+      $m.ResponderPolicy[$Matches.name] = @{ rule=$rule; action=$Matches.action; raw=$l }
+      continue
+    }
+
+    # Rewrite
+    if ($l -match '^\s*add\s+rewrite\s+action\s+(?<name>\S+)\s+(?<type>\S+)\b(?<rest>.*)$') {
+      $m.RewriteAction[$Matches.name] = @{ type=$Matches.type; params=($Matches.rest.Trim()); raw=$l }
+      continue
+    }
+
+    # common: add rewrite policy <name> <rule> <action>
+    if ($l -match '^\s*add\s+rewrite\s+policy\s+(?<name>\S+)\s+.+\s+(?<action>\S+)\s*$') {
+      # try to separate rule from action by removing leading "add rewrite policy <name>" and trailing "<action>"
+      $prefix = ("add rewrite policy {0}" -f $Matches.name)
+      $body = $l.Trim()
+      if ($body.StartsWith($prefix)) { $body = $body.Substring($prefix.Length).Trim() }
+      if ($body.EndsWith(" " + $Matches.action)) { $rule = $body.Substring(0, $body.Length - (" " + $Matches.action).Length).Trim() }
+      else { $rule = $body }
+      $m.RewritePolicy[$Matches.name] = @{ rule=$rule; action=$Matches.action; raw=$l }
+      continue
+    }
+
+    # Data
+    if ($l -match '^\s*add\s+policy\s+patset\s+(?<name>\S+)\b') { $m.Patset[$Matches.name]=$true; continue }
+    if ($l -match '^\s*add\s+policy\s+dataset\s+(?<name>\S+)\b') { $m.Dataset[$Matches.name]=$true; continue }
+
+    # -------------------
+    # Bindings (normalized)
+    # -------------------
+
+    # CS vServer binds CS policy
+    if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $m.Bindings += @{
+        TargetType="CS vServer"; TargetName=$Matches.vs
+        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        BindType="cs-vserver->cs-policy"; Extra=$l
+      }
+      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      continue
+    }
+
+    # CS vServer binds policyLabel
+    if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyLabel\s+(?<pl>\S+)(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $m.Bindings += @{
+        TargetType="CS vServer"; TargetName=$Matches.vs
+        Feature="CS"; PolicyName=$Matches.pl; Priority=$priority
+        BindType="cs-vserver->cs-policylabel"; Extra=$l
+      }
+      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
+      continue
+    }
+
+    # CS policyLabel binds CS policy
+    if ($l -match '^\s*bind\s+cs\s+policylabel\s+(?<pl>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $m.Bindings += @{
+        TargetType="CS Policy Label"; TargetName=$Matches.pl
+        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        BindType="cs-policylabel->cs-policy"; Extra=$l
+      }
+      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
+      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      continue
+    }
+
+    # LB vServer binds backend (serviceGroup or service)
+    if ($l -match '^\s*bind\s+lb\s+vserver\s+(?<lb>\S+)\s+(?<target>\S+)\b') {
+      $m.Bindings += @{
+        TargetType="LB vServer"; TargetName=$Matches.lb
+        Feature="LB"; PolicyName=$Matches.target; Priority=$null
+        BindType="lb-vserver->backend-target"; Extra=$l
+      }
+      Mark-Ref $m "UsedLbVserver" $Matches.lb
+      # heuristic: mark as sg or svc later when building views
+      continue
+    }
+
+    # serviceGroup member (server + port)
+    if ($l -match '^\s*bind\s+serviceGroup\s+(?<sg>\S+)\s+(?<server>\S+)\s+(?<port>\d+)\b') {
+      $m.Bindings += @{
+        TargetType="Service Group"; TargetName=$Matches.sg
+        Feature="LB"; PolicyName=$Matches.server; Priority=$null
+        BindType="servicegroup->member-server"; Extra=("port={0}" -f $Matches.port)
+      }
+      Mark-Ref $m "UsedServiceGroup" $Matches.sg
+      Mark-Ref $m "UsedServer" $Matches.server
+      continue
+    }
+
+    # serviceGroup -> monitor
+    if ($l -match '^\s*bind\s+serviceGroup\s+(?<sg>\S+)\s+-monitorName\s+(?<mon>\S+)\b') {
+      $m.Bindings += @{
+        TargetType="Service Group"; TargetName=$Matches.sg
+        Feature="LB"; PolicyName=$Matches.mon; Priority=$null
+        BindType="servicegroup->monitor"; Extra=$l
+      }
+      Mark-Ref $m "UsedServiceGroup" $Matches.sg
+      Mark-Ref $m "UsedMonitor" $Matches.mon
+      continue
+    }
+
+    # service -> monitor
+    if ($l -match '^\s*bind\s+service\s+(?<svc>\S+)\s+-monitorName\s+(?<mon>\S+)\b') {
+      $m.Bindings += @{
+        TargetType="Service"; TargetName=$Matches.svc
+        Feature="LB"; PolicyName=$Matches.mon; Priority=$null
+        BindType="service->monitor"; Extra=$l
+      }
+      Mark-Ref $m "UsedService" $Matches.svc
+      Mark-Ref $m "UsedMonitor" $Matches.mon
+      continue
+    }
+
+    # global responder
+    if ($l -match '^\s*bind\s+responder\s+global\s+(?<pol>\S+)(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $m.Bindings += @{
+        TargetType="Global"; TargetName="global"
+        Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
+        BindType="responder-global->policy"; Extra=$l
+      }
+      Mark-Ref $m "UsedResponderPolicy" $Matches.pol
+      continue
+    }
+
+    # responder bound to CS/LB vServer (type=RESPONSE)
+    if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
+      $m.Bindings += @{
+        TargetType=$t; TargetName=$Matches.vs
+        Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
+        BindType="responder->policy"; Extra=$l
+      }
+      Mark-Ref $m "UsedResponderPolicy" $Matches.pol
+      continue
+    }
+
+    # global rewrite
+    if ($l -match '^\s*bind\s+rewrite\s+global\s+(?<pol>\S+)(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $m.Bindings += @{
+        TargetType="Global"; TargetName="global"
+        Feature="Rewrite"; PolicyName=$Matches.pol; Priority=$priority
+        BindType="rewrite-global->policy"; Extra=$l
+      }
+      Mark-Ref $m "UsedRewritePolicy" $Matches.pol
+      continue
+    }
+
+    # rewrite bound to CS/LB vServer (type=REQUEST/RESPONSE)
+    if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+(?<rtype>REQUEST|RESPONSE)\b(?<rest>.*)$') {
+      $priority = $null
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
+      $m.Bindings += @{
+        TargetType=$t; TargetName=$Matches.vs
+        Feature="Rewrite"; PolicyName=$Matches.pol; Priority=$priority
+        BindType=("rewrite-{0}->policy" -f $Matches.rtype.ToLower()); Extra=$l
+      }
+      Mark-Ref $m "UsedRewritePolicy" $Matches.pol
+      continue
+    }
+
+    # SSL vServer cert binding (best-effort)
+    if ($l -match '^\s*bind\s+ssl\s+vserver\s+(?<vs>\S+)\s+-certkeyName\s+(?<ck>\S+)\b') {
+      $m.Bindings += @{
+        TargetType="SSL vServer"; TargetName=$Matches.vs
+        Feature="SSL"; PolicyName=$Matches.ck; Priority=$null
+        BindType="ssl-vserver->certkey"; Extra=$l
+      }
+      Mark-Ref $m "UsedCertKey" $Matches.ck
+      continue
+    }
+  }
+
+  # Derived refs: policy->action usage
+  foreach ($p in $m.CsPolicy.Keys)       { if ($m.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $m "UsedCsAction" $m.CsPolicy[$p].action } }
+  foreach ($p in $m.ResponderPolicy.Keys){ if ($m.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $m "UsedResponderAction" $m.ResponderPolicy[$p].action } }
+  foreach ($p in $m.RewritePolicy.Keys)  { if ($m.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $m "UsedRewriteAction" $m.RewritePolicy[$p].action } }
+
+  return $m
+}
+
+# ---------------------------
+# Build “meaningful views”
+# ---------------------------
+function Get-CsFlows {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $rows = @()
+
+  # direct CS policy binds
+  $direct = @($m.Bindings | Where-Object { $_.BindType -eq "cs-vserver->cs-policy" })
+  # label binds and label->policy binds
+  $vsToLabel = @($m.Bindings | Where-Object { $_.BindType -eq "cs-vserver->cs-policylabel" })
+  $labelToPol= @($m.Bindings | Where-Object { $_.BindType -eq "cs-policylabel->cs-policy" })
+
+  foreach ($b in $direct) {
+    $pol = $b.PolicyName
+    $polDef = $m.CsPolicy[$pol]
+    $csActName = if ($polDef) { $polDef.action } else { "" }
+    $csActDef  = if ($csActName) { $m.CsAction[$csActName] } else { $null }
+    $targetLb  = if ($csActDef) { $csActDef.targetLbVserver } else { "" }
+    if ($targetLb) { Mark-Ref $m "UsedLbVserver" $targetLb }
+
+    $rows += [pscustomobject]@{
+      CsVserver = $b.TargetName
+      Source   = "direct"
+      Priority = $b.Priority
+      CsPolicy = $pol
+      MatchRule= if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
+      CsAction = if ($csActName) { $csActName } else { "[NOT FOUND]" }
+      TargetLbVserver = if ($targetLb) { $targetLb } else { "" }
+    }
+  }
+
+  foreach ($vb in $vsToLabel) {
+    $label = $vb.PolicyName
+    $lp = @($labelToPol | Where-Object { $_.TargetName -eq $label })
+    foreach ($lb in $lp) {
+      $pol = $lb.PolicyName
+      $polDef = $m.CsPolicy[$pol]
+      $csActName = if ($polDef) { $polDef.action } else { "" }
+      $csActDef  = if ($csActName) { $m.CsAction[$csActName] } else { $null }
+      $targetLb  = if ($csActDef) { $csActDef.targetLbVserver } else { "" }
+      if ($targetLb) { Mark-Ref $m "UsedLbVserver" $targetLb }
+
+      $rows += [pscustomobject]@{
+        CsVserver = $vb.TargetName
+        Source   = ("label:{0}" -f $label)
+        Priority = ($lb.Priority) # label binding priority more meaningful than label attachment
+        CsPolicy = $pol
+        MatchRule= if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
+        CsAction = if ($csActName) { $csActName } else { "[NOT FOUND]" }
+        TargetLbVserver = if ($targetLb) { $targetLb } else { "" }
+      }
+    }
+  }
+
+  return @($rows | Sort-Object CsVserver, @{Expression="Priority"; Ascending=$true})
+}
+
+function Get-ResponderTable {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $rows = @()
+  $binds = @($m.Bindings | Where-Object { $_.Feature -eq "Responder" -and $_.PolicyName })
+
+  foreach ($b in $binds) {
+    $pol = $b.PolicyName
+    $polDef = $m.ResponderPolicy[$pol]
+    $actName = if ($polDef) { $polDef.action } else { "" }
+    $actDef  = if ($actName) { $m.ResponderAction[$actName] } else { $null }
+
+    if ($actName) { Mark-Ref $m "UsedResponderAction" $actName }
+
+    $rows += [pscustomobject]@{
+      BoundToType = $b.TargetType
+      BoundToName = $b.TargetName
+      Priority    = $b.Priority
+      Policy      = $pol
+      MatchRule   = if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
+      Action      = if ($actName) { $actName } else { "[NOT FOUND]" }
+      ActionType  = if ($actDef) { $actDef.type } else { "" }
+      ActionParams= if ($actDef) { $actDef.params } else { "" }
+    }
+  }
+
+  return @($rows | Sort-Object BoundToType, BoundToName, @{Expression="Priority"; Ascending=$true}, Policy)
+}
+
+function Get-RewriteTable {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $rows = @()
+  $binds = @($m.Bindings | Where-Object { $_.Feature -eq "Rewrite" -and $_.PolicyName })
+
+  foreach ($b in $binds) {
+    $pol = $b.PolicyName
+    $polDef = $m.RewritePolicy[$pol]
+    $actName = if ($polDef) { $polDef.action } else { "" }
+    $actDef  = if ($actName) { $m.RewriteAction[$actName] } else { $null }
+
+    if ($actName) { Mark-Ref $m "UsedRewriteAction" $actName }
+
+    $rows += [pscustomobject]@{
+      BoundToType = $b.TargetType
+      BoundToName = $b.TargetName
+      Priority    = $b.Priority
+      Policy      = $pol
+      MatchRule   = if ($polDef) { $polDef.rule } else { "[NOT FOUND]" }
+      Action      = if ($actName) { $actName } else { "[NOT FOUND]" }
+      ActionType  = if ($actDef) { $actDef.type } else { "" }
+      ActionParams= if ($actDef) { $actDef.params } else { "" }
+    }
+  }
+
+  return @($rows | Sort-Object BoundToType, BoundToName, @{Expression="Priority"; Ascending=$true}, Policy)
+}
+
+function Get-BackendTable {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $rows = @()
+
+  $lbToBackend = @($m.Bindings | Where-Object { $_.BindType -eq "lb-vserver->backend-target" })
+  foreach ($b in $lbToBackend) {
+    $lb = $b.TargetName
+    $backend = $b.PolicyName
+
+    # is it a serviceGroup or a service?
+    $isSg = $m.ServiceGroup.ContainsKey($backend)
+    $isSvc= $m.Service.ContainsKey($backend)
+
+    if ($isSg) { Mark-Ref $m "UsedServiceGroup" $backend }
+    if ($isSvc){ Mark-Ref $m "UsedService" $backend }
+
+    $rows += [pscustomobject]@{
+      LbVserver = $lb
+      BackendType = if ($isSg) { "Service Group" } elseif ($isSvc) { "Service" } else { "Unknown" }
+      BackendName = $backend
+      BackendDetails = if ($isSg) { ("proto={0}" -f $m.ServiceGroup[$backend].proto) }
+                       elseif ($isSvc) { ("server={0} port={1} proto={2}" -f $m.Service[$backend].server, $m.Service[$backend].port, $m.Service[$backend].proto) }
+                       else { "[NOT FOUND]" }
+    }
+  }
+
+  # expand serviceGroup members + monitors
+  $sgMembers = @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->member-server" })
+  $sgMons    = @($m.Bindings | Where-Object { $_.BindType -eq "servicegroup->monitor" })
+
+  $expanded = @()
+  foreach ($r in $rows) {
+    if ($r.BackendType -ne "Service Group") { continue }
+    $sg = $r.BackendName
+
+    $members = @($sgMembers | Where-Object { $_.TargetName -eq $sg })
+    $mons    = @($sgMons    | Where-Object { $_.TargetName -eq $sg })
+
+    $memberText = if ($members.Count -gt 0) {
+      ($members | ForEach-Object { "{0} ({1})" -f $_.PolicyName, $_.Extra }) -join ", "
+    } else { "" }
+
+    $monText = if ($mons.Count -gt 0) { ($mons | ForEach-Object { $_.PolicyName }) -join ", " } else { "" }
+
+    $expanded += [pscustomobject]@{
+      LbVserver = $r.LbVserver
+      ServiceGroup = $sg
+      Members = $memberText
+      Monitors = $monText
+    }
+  }
+
+  return [pscustomobject]@{
+    LbToBackend = @($rows | Sort-Object LbVserver, BackendType, BackendName)
+    ServiceGroupExpansion = @($expanded | Sort-Object LbVserver, ServiceGroup)
+  }
+}
+
+# ---------------------------
+# Stray artifact detection
+# ---------------------------
+function Get-StrayArtifacts {
+  param([Parameter(Mandatory=$true)]$m)
+
+  $items = @()
+
+  function Add-Stray($type, $name, $reason) {
+    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+  }
+
+  # Defined but not used
+  foreach ($k in $m.CsPolicy.Keys)        { if (-not $m.Refs.UsedCsPolicy.ContainsKey($k)) { Add-Stray "CS Policy" $k "Defined but not bound (unused?)" } }
+  foreach ($k in $m.CsAction.Keys)        { if (-not $m.Refs.UsedCsAction.ContainsKey($k)) { Add-Stray "CS Action" $k "Defined but not referenced by used CS policy" } }
+  foreach ($k in $m.CsPolicyLabel.Keys)   { if (-not $m.Refs.UsedCsPolicyLabel.ContainsKey($k)) { Add-Stray "CS Policy Label" $k "Defined but not attached/bound (unused?)" } }
+
+  foreach ($k in $m.ResponderPolicy.Keys) { if (-not $m.Refs.UsedResponderPolicy.ContainsKey($k)) { Add-Stray "Responder Policy" $k "Defined but not bound (unused?)" } }
+  foreach ($k in $m.ResponderAction.Keys) { if (-not $m.Refs.UsedResponderAction.ContainsKey($k)) { Add-Stray "Responder Action" $k "Defined but not referenced by used policy" } }
+
+  foreach ($k in $m.RewritePolicy.Keys)   { if (-not $m.Refs.UsedRewritePolicy.ContainsKey($k)) { Add-Stray "Rewrite Policy" $k "Defined but not bound (unused?)" } }
+  foreach ($k in $m.RewriteAction.Keys)   { if (-not $m.Refs.UsedRewriteAction.ContainsKey($k)) { Add-Stray "Rewrite Action" $k "Defined but not referenced by used policy" } }
+
+  foreach ($k in $m.ServiceGroup.Keys)    { if (-not $m.Refs.UsedServiceGroup.ContainsKey($k)) { Add-Stray "Service Group" $k "Defined but not referenced by LB vServer / member bind" } }
+  foreach ($k in $m.Service.Keys)         { if (-not $m.Refs.UsedService.ContainsKey($k)) { Add-Stray "Service" $k "Defined but not referenced by LB vServer / monitor bind" } }
+  foreach ($k in $m.Server.Keys)          { if (-not $m.Refs.UsedServer.ContainsKey($k)) { Add-Stray "Server" $k "Defined but not referenced in service/serviceGroup members" } }
+  foreach ($k in $m.Monitor.Keys)         { if (-not $m.Refs.UsedMonitor.ContainsKey($k)) { Add-Stray "Monitor" $k "Defined but not bound to service/serviceGroup" } }
+  foreach ($k in $m.SslCertKey.Keys)      { if (-not $m.Refs.UsedCertKey.ContainsKey($k)) { Add-Stray "SSL CertKey" $k "Defined but not bound to an SSL vServer (in provided files)" } }
+
+  # Referenced but not defined (in provided set)
+  foreach ($k in $m.Refs.UsedCsPolicy.Keys)        { if (-not $m.CsPolicy.ContainsKey($k)) { Add-Stray "CS Policy" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedCsAction.Keys)        { if (-not $m.CsAction.ContainsKey($k)) { Add-Stray "CS Action" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedCsPolicyLabel.Keys)   { if (-not $m.CsPolicyLabel.ContainsKey($k)) { Add-Stray "CS Policy Label" $k "Referenced but not defined (missing file?)" } }
+
+  foreach ($k in $m.Refs.UsedResponderPolicy.Keys) { if (-not $m.ResponderPolicy.ContainsKey($k)) { Add-Stray "Responder Policy" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedResponderAction.Keys) { if (-not $m.ResponderAction.ContainsKey($k)) { Add-Stray "Responder Action" $k "Referenced but not defined (missing file?)" } }
+
+  foreach ($k in $m.Refs.UsedRewritePolicy.Keys)   { if (-not $m.RewritePolicy.ContainsKey($k)) { Add-Stray "Rewrite Policy" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedRewriteAction.Keys)   { if (-not $m.RewriteAction.ContainsKey($k)) { Add-Stray "Rewrite Action" $k "Referenced but not defined (missing file?)" } }
+
+  foreach ($k in $m.Refs.UsedLbVserver.Keys)       { if (-not $m.LbVserver.ContainsKey($k)) { Add-Stray "LB vServer" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedServiceGroup.Keys)    { if (-not $m.ServiceGroup.ContainsKey($k)) { Add-Stray "Service Group" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedService.Keys)         { if (-not $m.Service.ContainsKey($k)) { Add-Stray "Service" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedServer.Keys)          { if (-not $m.Server.ContainsKey($k)) { Add-Stray "Server" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedMonitor.Keys)         { if (-not $m.Monitor.ContainsKey($k)) { Add-Stray "Monitor" $k "Referenced but not defined (missing file?)" } }
+  foreach ($k in $m.Refs.UsedCertKey.Keys)         { if (-not $m.SslCertKey.ContainsKey($k)) { Add-Stray "SSL CertKey" $k "Referenced but not defined (missing file?)" } }
+
+  return @($items | Sort-Object Type, Name, Reason)
+}
+
+# ---------------------------
+# Graph (meaningful, not exhaustive)
+# ---------------------------
+function Write-FlowDot {
+  param(
+    [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)][string]$baseName,
+    [Parameter(Mandatory=$true)][string]$dir,
+    [Parameter(Mandatory=$true)]$csFlows
+  )
+
+  $dotPath = Join-Path $dir ($baseName + ".flow.dot")
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("digraph netscaler {")
+  $lines.Add("  rankdir=LR;")
+  $lines.Add('  node [shape=box, fontsize=10];')
+  $lines.Add('  edge [fontsize=9];')
+  $lines.Add(('  label="Flow (migration-focused): {0}"; labelloc="t"; fontsize=18;' -f $baseName))
+
+  # Nodes: CS VS, CS policy, CS action, LB VS (only those referenced by CS flows)
+  $seen = @{}
+
+  function Node($id, $label) {
+    if ($seen.ContainsKey($id)) { return }
+    $seen[$id] = $true
+    $safe = ($label -replace '"','\"')
+    $lines.Add(("  {0} [label=""{1}""];" -f $id, $safe))
+  }
+  function Edge($from, $to, $label) {
+    $safe = ($label -replace '"','\"')
+    $lines.Add(("  {0} -> {1} [label=""{2}""];" -f $from, $to, $safe))
+  }
+  function Id($prefix, $name) {
+    return (($prefix + "_" + ($name -replace '[^a-zA-Z0-9_]', '_')))
+  }
+
+  foreach ($r in @($csFlows)) {
+    $vsId = Id "cs" $r.CsVserver
+    $polId= Id "csp" $r.CsPolicy
+    $actId= Id "csa" $r.CsAction
+    $lbId = if ($r.TargetLbVserver) { Id "lb" $r.TargetLbVserver } else { $null }
+
+    Node $vsId ("CS vServer`n{0}" -f $r.CsVserver)
+    Node $polId ("CS Policy`n{0}" -f $r.CsPolicy)
+    Node $actId ("CS Action`n{0}" -f $r.CsAction)
+    Edge $vsId $polId ("prio={0}" -f ($r.Priority))
+    Edge $polId $actId "action"
+
+    if ($lbId) {
+      Node $lbId ("LB vServer`n{0}" -f $r.TargetLbVserver)
+      Edge $actId $lbId "target"
+    }
+  }
+
+  # Global responder/rewrite callouts (not drawn to every vserver; just note)
+  $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" })
+  $globRw   = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Rewrite" })
+  if ($globResp.Count -gt 0 -or $globRw.Count -gt 0) {
+    $gId = "global_policies"
+    Node $gId "Global Policies (affect broad traffic)"
+    if ($globResp.Count -gt 0) { Edge $gId $gId ("Responder global binds: {0}" -f $globResp.Count) }
+    if ($globRw.Count -gt 0) { Edge $gId $gId ("Rewrite global binds: {0}" -f $globRw.Count) }
+  }
+
+  $lines.Add("}")
+  Out-FileUtf8NoBom -Path $dotPath -Content ($lines -join "`r`n")
+  return $dotPath
+}
+
+# ---------------------------
+# HTML report writer (migration-centric)
+# ---------------------------
+function Write-Report {
+  param(
+    [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)][string]$baseName,
+    [Parameter(Mandatory=$true)][string]$dir,
+    [Parameter(Mandatory=$true)]$csFlows,
+    [Parameter(Mandatory=$true)]$respTable,
+    [Parameter(Mandatory=$true)]$rwTable,
+    [Parameter(Mandatory=$true)]$backend,
+    [Parameter(Mandatory=$true)]$strays,
+    [string]$flowDot,
+    [string]$flowGraphic
+  )
+
+  Ensure-Dir $dir
+
+  $htmlPath = Join-Path $dir ($baseName + ".report.html")
+  $csCsv    = Join-Path $dir ($baseName + ".csflows.csv")
+  $respCsv  = Join-Path $dir ($baseName + ".responder.csv")
+  $rwCsv    = Join-Path $dir ($baseName + ".rewrite.csv")
+  $lbCsv    = Join-Path $dir ($baseName + ".lb-backend.csv")
+  $sgCsv    = Join-Path $dir ($baseName + ".servicegroup-expansion.csv")
+  $strayCsv = Join-Path $dir ($baseName + ".strays.csv")
+
+  @($csFlows)    | Export-Csv -NoTypeInformation -Path $csCsv -Encoding UTF8
+  @($respTable)  | Export-Csv -NoTypeInformation -Path $respCsv -Encoding UTF8
+  @($rwTable)    | Export-Csv -NoTypeInformation -Path $rwCsv -Encoding UTF8
+  @($backend.LbToBackend) | Export-Csv -NoTypeInformation -Path $lbCsv -Encoding UTF8
+  @($backend.ServiceGroupExpansion) | Export-Csv -NoTypeInformation -Path $sgCsv -Encoding UTF8
+  @($strays)     | Export-Csv -NoTypeInformation -Path $strayCsv -Encoding UTF8
+
+  $entrypoints = @()
+
+  foreach ($k in $m.CsVserver.Keys) {
+    $o = $m.CsVserver[$k]
+    $entrypoints += [pscustomobject]@{ Type="CS vServer"; Name=$k; Address=("{0}:{1}" -f $o.vip, $o.port); Proto=$o.proto }
+  }
+  foreach ($k in $m.LbVserver.Keys) {
+    $o = $m.LbVserver[$k]
+    $entrypoints += [pscustomobject]@{ Type="LB vServer"; Name=$k; Address=("{0}:{1}" -f $o.vip, $o.port); Proto=$o.proto }
+  }
+
+  $globResp = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Responder" } | Sort-Object Priority, PolicyName)
+  $globRw   = @($m.Bindings | Where-Object { $_.TargetType -eq "Global" -and $_.Feature -eq "Rewrite" } | Sort-Object Priority, PolicyName)
+
+  $flowLink = ""
+  if ($flowGraphic) { $flowLink = "<p><b>Flow graphic:</b> <a href=""$flowGraphic"">$([IO.Path]::GetFileName($flowGraphic))</a></p>" }
+  elseif ($flowDot) { $flowLink = "<p><b>Flow DOT:</b> <a href=""$flowDot"">$([IO.Path]::GetFileName($flowDot))</a></p>" }
+
+  $html = @"
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>$baseName - NetScaler Migration Report</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 18px 0; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+    th { background: #f3f3f3; }
+    h2 { margin-top: 28px; }
+    .callout { background: #fff8e1; border: 1px solid #f1e0a3; padding: 10px; }
+    pre { background: #f8f8f8; padding: 10px; border: 1px solid #eee; overflow-x: auto; }
+    .small { color: #555; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>NetScaler Migration Report</h1>
+  <p><b>Source:</b> $($m.File)</p>
+
+  <div class="callout">
+    <b>How to use this report for migration</b>
+    <ul>
+      <li>Start with <b>Entry Points</b>.</li>
+      <li>For each CS vServer, use <b>CS Routing Flows</b> to see where traffic goes.</li>
+      <li>Use <b>Responder</b> and <b>Rewrite</b> sections to understand what is being modified/blocked/redirected (policy + rule + action definition).</li>
+      <li>Use <b>LB Backends</b> to rebuild server pools and monitors.</li>
+      <li>Review <b>Stray Artifacts</b> to clean up or confirm intent before migrating.</li>
+    </ul>
+  </div>
+
+  <h2>Entry Points</h2>
+  $((@($entrypoints) | Sort-Object Type, Name | ConvertTo-Html -Fragment))
+
+  <h2>Global Bindings (High Impact)</h2>
+  <p class="small">These policies can affect broad traffic scope. Validate intent before migrating.</p>
+  <h3>Responder (global)</h3>
+  $((@($globResp) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+  <h3>Rewrite (global)</h3>
+  $((@($globRw) | Select-Object Priority, PolicyName, BindType, Extra | ConvertTo-Html -Fragment))
+
+  $flowLink
+
+  <h2>CS Routing Flows (CS vServer → Policy → Action → Target LB vServer)</h2>
+  <p class="small">This is the core “where does traffic go?” view.</p>
+  $((@($csFlows) | ConvertTo-Html -Fragment))
+
+  <h2>Responder (Bound Policy → Rule → Action Definition)</h2>
+  <p class="small">This section explains what responder policies do by pairing policies with their actions.</p>
+  $((@($respTable) | ConvertTo-Html -Fragment))
+
+  <h2>Rewrite (Bound Policy → Rule → Action Definition)</h2>
+  <p class="small">This section explains rewrite behavior by pairing policies with actions.</p>
+  $((@($rwTable) | ConvertTo-Html -Fragment))
+
+  <h2>LB Backends (LB vServer → Backend target)</h2>
+  $((@($backend.LbToBackend) | ConvertTo-Html -Fragment))
+
+  <h2>Service Group Expansion (Members + Monitors)</h2>
+  $((@($backend.ServiceGroupExpansion) | ConvertTo-Html -Fragment))
+
+  <h2>Stray Artifacts (Review Candidates)</h2>
+  <p class="small">Likely unused, or missing from the provided config set. Confirm before migrating.</p>
+  $((@($strays) | ConvertTo-Html -Fragment))
+
+  <h2>Downloads</h2>
+  <ul>
+    <li><a href="$([IO.Path]::GetFileName($csCsv))">$([IO.Path]::GetFileName($csCsv))</a></li>
+    <li><a href="$([IO.Path]::GetFileName($respCsv))">$([IO.Path]::GetFileName($respCsv))</a></li>
+    <li><a href="$([IO.Path]::GetFileName($rwCsv))">$([IO.Path]::GetFileName($rwCsv))</a></li>
+    <li><a href="$([IO.Path]::GetFileName($lbCsv))">$([IO.Path]::GetFileName($lbCsv))</a></li>
+    <li><a href="$([IO.Path]::GetFileName($sgCsv))">$([IO.Path]::GetFileName($sgCsv))</a></li>
+    <li><a href="$([IO.Path]::GetFileName($strayCsv))">$([IO.Path]::GetFileName($strayCsv))</a></li>
+  </ul>
+
+</body>
+</html>
+"@
+
+  Out-FileUtf8NoBom -Path $htmlPath -Content $html
+  return $htmlPath
+}
+
+# ---------------------------
+# Main
+# ---------------------------
+# Normalize OutDir for predictable behavior
+try {
+  $OutDir = (Resolve-Path -LiteralPath $OutDir -ErrorAction Stop).Path
+} catch {
+  $OutDir = Join-Path (Get-Location).Path $OutDir
+}
+
+Ensure-Dir $OutDir
+$perFileDir  = Join-Path $OutDir "per-file"
+$combinedDir = Join-Path $OutDir "combined"
+Ensure-Dir $perFileDir
+Ensure-Dir $combinedDir
+
+$dotExe = Find-DotExe -override $DotExePath
+
+$models = @()
+foreach ($f in $ConfigFiles) {
+  if (-not (Test-Path -LiteralPath $f)) { throw "Config file not found: $f" }
+  $models += Parse-NsConfigFile -FilePath $f
+}
+
+$indexRows = @()
+$renderWarn = @()
+
+foreach ($m in $models) {
+  $name = [IO.Path]::GetFileNameWithoutExtension($m.File)
+  $dir  = Join-Path $perFileDir $name
+  Ensure-Dir $dir
+
+  $csFlows   = Get-CsFlows -m $m
+  $respTable = Get-ResponderTable -m $m
+  $rwTable   = Get-RewriteTable -m $m
+  $backend   = Get-BackendTable -m $m
+  $strays    = Get-StrayArtifacts -m $m
+
+  $flowDot = Write-FlowDot -m $m -baseName $name -dir $dir -csFlows $csFlows
+  $flowGraphic = $null
+
+  if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
+    $flowGraphic = Render-GraphSafe -DotExe $dotExe -DotPath $flowDot -Format $GraphFormat
+    if (-not $flowGraphic) { $renderWarn += "Render failed: $flowDot" }
+  }
+
+  $report = Write-Report -m $m -baseName $name -dir $dir -csFlows $csFlows -respTable $respTable -rwTable $rwTable -backend $backend -strays $strays -flowDot $flowDot -flowGraphic $flowGraphic
+
+  $indexRows += [pscustomobject]@{
+    File       = $m.File
+    ReportHtml = $report
+    Flow       = if ($flowGraphic) { $flowGraphic } else { $flowDot }
+  }
+}
+
+# Combined report (merge by concatenating definitions/bindings; “missing” checks become more accurate)
+$cm = New-NsModel
+$cm.File = "ALL FILES (combined)"
+
+foreach ($m in $models) {
+  foreach ($k in $m.CsVserver.Keys)        { $cm.CsVserver[$k] = $m.CsVserver[$k] }
+  foreach ($k in $m.LbVserver.Keys)        { $cm.LbVserver[$k] = $m.LbVserver[$k] }
+  foreach ($k in $m.Server.Keys)           { $cm.Server[$k] = $m.Server[$k] }
+  foreach ($k in $m.ServiceGroup.Keys)     { $cm.ServiceGroup[$k] = $m.ServiceGroup[$k] }
+  foreach ($k in $m.Service.Keys)          { $cm.Service[$k] = $m.Service[$k] }
+  foreach ($k in $m.Monitor.Keys)          { $cm.Monitor[$k] = $m.Monitor[$k] }
+  foreach ($k in $m.SslCertKey.Keys)       { $cm.SslCertKey[$k] = $m.SslCertKey[$k] }
+  foreach ($k in $m.CsAction.Keys)         { $cm.CsAction[$k] = $m.CsAction[$k] }
+  foreach ($k in $m.CsPolicy.Keys)         { $cm.CsPolicy[$k] = $m.CsPolicy[$k] }
+  foreach ($k in $m.CsPolicyLabel.Keys)    { $cm.CsPolicyLabel[$k] = $m.CsPolicyLabel[$k] }
+  foreach ($k in $m.ResponderAction.Keys)  { $cm.ResponderAction[$k] = $m.ResponderAction[$k] }
+  foreach ($k in $m.ResponderPolicy.Keys)  { $cm.ResponderPolicy[$k] = $m.ResponderPolicy[$k] }
+  foreach ($k in $m.RewriteAction.Keys)    { $cm.RewriteAction[$k] = $m.RewriteAction[$k] }
+  foreach ($k in $m.RewritePolicy.Keys)    { $cm.RewritePolicy[$k] = $m.RewritePolicy[$k] }
+  foreach ($k in $m.Patset.Keys)           { $cm.Patset[$k] = $true }
+  foreach ($k in $m.Dataset.Keys)          { $cm.Dataset[$k] = $true }
+
+  $cm.Bindings += @($m.Bindings)
+}
+
+# recompute refs/actions usage for combined
+# mark refs from combined bindings
+foreach ($b in @($cm.Bindings)) {
+  switch ($b.Feature) {
+    "CS" {
+      if ($b.BindType -eq "cs-vserver->cs-policy")       { Mark-Ref $cm "UsedCsPolicy" $b.PolicyName }
+      if ($b.BindType -eq "cs-vserver->cs-policylabel")  { Mark-Ref $cm "UsedCsPolicyLabel" $b.PolicyName }
+      if ($b.BindType -eq "cs-policylabel->cs-policy")   { Mark-Ref $cm "UsedCsPolicyLabel" $b.TargetName; Mark-Ref $cm "UsedCsPolicy" $b.PolicyName }
+    }
+    "Responder" { Mark-Ref $cm "UsedResponderPolicy" $b.PolicyName }
+    "Rewrite"   { Mark-Ref $cm "UsedRewritePolicy" $b.PolicyName }
+    "LB" {
+      if ($b.TargetType -eq "LB vServer") { Mark-Ref $cm "UsedLbVserver" $b.TargetName }
+    }
+    "SSL" { Mark-Ref $cm "UsedCertKey" $b.PolicyName }
+  }
+}
+foreach ($p in $cm.CsPolicy.Keys)        { if ($cm.Refs.UsedCsPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedCsAction" $cm.CsPolicy[$p].action } }
+foreach ($p in $cm.ResponderPolicy.Keys) { if ($cm.Refs.UsedResponderPolicy.ContainsKey($p)) { Mark-Ref $cm "UsedResponderAction" $cm.ResponderPolicy[$p].action } }
+foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.ContainsKey($p)) { Mark-Ref $cm "UsedRewriteAction" $cm.RewritePolicy[$p].action } }
+
+$combinedName = "ALL"
+$csFlowsC   = Get-CsFlows -m $cm
+$respTableC = Get-ResponderTable -m $cm
+$rwTableC   = Get-RewriteTable -m $cm
+$backendC   = Get-BackendTable -m $cm
+$straysC    = Get-StrayArtifacts -m $cm
+$flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
+$flowGraphicC = $null
+
+if (-not $SkipGraphRender -and $dotExe -and ($GraphFormat -ne 'dot')) {
+  $flowGraphicC = Render-GraphSafe -DotExe $dotExe -DotPath $flowDotC -Format $GraphFormat
+  if (-not $flowGraphicC) { $renderWarn += "Render failed: $flowDotC" }
+}
+
+$combinedReport = Write-Report -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC -respTable $respTableC -rwTable $rwTableC -backend $backendC -strays $straysC -flowDot $flowDotC -flowGraphic $flowGraphicC
+
+# Index
+$indexHtml = Join-Path $OutDir "index.html"
+$rows = ($indexRows | ForEach-Object {
+  "<tr><td>$($_.File)</td><td><a href=""$($_.ReportHtml)"">report</a></td><td><a href=""$($_.Flow)"">flow</a></td></tr>"
+}) -join "`r`n"
+
+$warnBlock = ""
+if (@($renderWarn).Count -gt 0) {
+  $warnBlock = "<h2>Graph Rendering Warnings</h2><pre>" + ($renderWarn -join "`n") + "</pre>"
+}
+
+$renderStatus =
+  if ($SkipGraphRender) { "Skipped (-SkipGraphRender). DOT only." }
+  elseif (-not $dotExe) { "dot.exe not found. DOT only." }
+  elseif ($GraphFormat -eq 'dot') { "Format=dot. DOT only." }
+  else { "Attempted $GraphFormat using $dotExe" }
+
+$idx = @"
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NetScaler Migration Overview</title>
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin: 24px; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0 18px 0; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; vertical-align: top; }
+    th { background: #f3f3f3; }
+    pre { background: #f8f8f8; padding: 10px; border: 1px solid #eee; }
+  </style>
+</head>
+<body>
+  <h1>NetScaler Migration Overview</h1>
+
+  <h2>Combined</h2>
+  <ul>
+    <li><a href="$combinedReport">ALL.report.html</a></li>
+    <li><a href="$(if ($flowGraphicC) { $flowGraphicC } else { $flowDotC })">ALL flow</a></li>
+  </ul>
+
+  <h2>Per-file</h2>
+  <table>
+    <tr><th>Config File</th><th>Report</th><th>Flow</th></tr>
+    $rows
+  </table>
+
+  <h2>Graph rendering</h2>
+  <p><b>Status:</b> $renderStatus</p>
+  $warnBlock
+</body>
+</html>
+"@
+
+Out-FileUtf8NoBom -Path $indexHtml -Content $idx
+
+Write-Host ("Output directory: {0}" -f $OutDir)
+Write-Host ("Index: {0}" -f $indexHtml)
