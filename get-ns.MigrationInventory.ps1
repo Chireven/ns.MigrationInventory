@@ -802,10 +802,10 @@ function Get-BackendTable {
 function Get-StrayArtifacts {
   param([Parameter(Mandatory=$true)]$m)
 
-  $items = @()
+  $items = New-Object 'System.Collections.Generic.List[object]'
 
   function Add-Stray($type, $name, $reason) {
-    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+    $null = $items.Add([pscustomobject]@{ Type=$type; Name=$name; Reason=$reason })
   }
 
   # Defined but not used
@@ -1116,6 +1116,7 @@ foreach ($m in $models) {
   Ensure-Dir $dir
 
   $csFlows   = Get-CsFlows -m $m
+  if ($null -eq $csFlows) { $csFlows = @() }
   $respTable = Get-ResponderTable -m $m
   $rwTable   = Get-RewriteTable -m $m
   $backend   = Get-BackendTable -m $m
@@ -1186,6 +1187,7 @@ foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.Contai
 
 $combinedName = "ALL"
 $csFlowsC   = Get-CsFlows -m $cm
+if ($null -eq $csFlowsC) { $csFlowsC = @() }
 $respTableC = Get-ResponderTable -m $cm
 $rwTableC   = Get-RewriteTable -m $cm
 $backendC   = Get-BackendTable -m $cm
