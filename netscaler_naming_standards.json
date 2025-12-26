@@ -1,0 +1,778 @@
+{
+  "global_notes": {
+    "section_name_readable": "Global Notes (Not Objects)",
+    "datacenter_tagging": {
+      "object_name_readable": "Datacenter Tagging",
+      "prefix": "N/A",
+      "middle": "N/A",
+      "suffix": "N/A",
+      "example": "N/A",
+      "notes": "In multi-site deployments, use a short site or datacenter tag (e.g., -bl, -bc) immediately before the protocol/port suffix on site-local objects (vServers, Services, Service Groups). Refer to individual object notes for placement."
+    },
+    "case_format": {
+      "object_name_readable": "Case & Format",
+      "prefix": "N/A",
+      "middle": "N/A",
+      "suffix": "N/A",
+      "example": "cx-vs-citrix.com-443",
+      "notes": "All names must be lowercase and adhere to the {prefix}-{middle}-{suffix} structure. Environment tags are unnecessary since each environment has its own VPX."
+    }
+  },
+  "content_switching_cs": {
+    "section_name_readable": "Content Switching (CS)",
+    "content_switching_action": {
+      "object_name_readable": "Content Switching Action",
+      "prefix": "cx-act-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<protocol>",
+      "example": "cx-act-citrix.contoso.com-ssl",
+      "notes": "Protocol suffix indicates target protocol (ssl, http, tcp)."
+    },
+    "content_switching_policy": {
+      "object_name_readable": "Content Switching Policy",
+      "prefix": "cx-pol-",
+      "middle": "<match-logic>",
+      "suffix": "",
+      "example": "cx-pol-host-citrix.contoso.com",
+      "notes": "Matching logic such as hostname or path."
+    },
+    "content_switching_vserver": {
+      "object_name_readable": "Content Switching vServer",
+      "prefix": "cx-vs-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<port>",
+      "example": "cx-vs-citrix.contoso.com-443",
+      "notes": "Port suffix shows listener port; see Global Notes for optional datacenter tag."
+    },
+    "content_switching_policy_label": {
+      "object_name_readable": "Content Switching Policy Label",
+      "prefix": "cx-pl-",
+      "middle": "<service-grouping-function>",
+      "suffix": "",
+      "example": "cx-pl-citrix-host-to-path",
+      "notes": "Used for grouped or chained policies. **Include the function** (e.g., host-to-path, security-checks) for flow clarity."
+    }
+  },
+  "load_balancing_lb": {
+    "section_name_readable": "Load Balancing (LB)",
+    "load_balancing_vserver": {
+      "object_name_readable": "Load Balancing vServer",
+      "prefix": "lb-vs-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<protocol>",
+      "example": "lb-vs-studio.test.contoso.com-ssl",
+      "notes": "Mirrors Content Switching naming. Protocol suffix usually ssl, http, tcp; see Global Notes for optional datacenter tag."
+    }
+  },
+  "ssl_objects": {
+    "section_name_readable": "SSL Objects",
+    "ssl_profile_front_end": {
+      "object_name_readable": "SSL Profile (Front-End)",
+      "prefix": "ssl-",
+      "middle": "<service or FQDN>",
+      "suffix": "-fe",
+      "example": "ssl-citrix.contoso.com-fe",
+      "notes": "Used for client-facing vServers (CS/LB front-end)."
+    },
+    "ssl_profile_back_end": {
+      "object_name_readable": "SSL Profile (Back-End)",
+      "prefix": "ssl-",
+      "middle": "<service or FQDN>",
+      "suffix": "-be",
+      "example": "ssl-citrix.contoso.com-be",
+      "notes": "Used for server-facing SSL services or service groups (re-encryption)."
+    },
+    "shared_ssl_profile": {
+      "object_name_readable": "Shared SSL Profile",
+      "prefix": "ssl-shared-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "ssl-shared-modern",
+      "notes": "Generic reusable profile for standardized cipher/protocol settings."
+    },
+    "certificate_file": {
+      "object_name_readable": "Certificate File",
+      "prefix": "crt-",
+      "middle": "<fqdn>",
+      "suffix": "-<expiration_year>",
+      "example": "crt-citrix.contoso.com-2026.pem",
+      "notes": "Certificate exported from PKI. FQDN identifies the service; suffix is expiration year."
+    },
+    "private_key_file": {
+      "object_name_readable": "Private Key File",
+      "prefix": "key-",
+      "middle": "<fqdn>",
+      "suffix": "-<expiration_year>",
+      "example": "key-citrix.contoso.com-2026.key",
+      "notes": "Private key paired with the certificate; same middle/suffix as certificate for pairing."
+    },
+    "certificate_key_pair": {
+      "object_name_readable": "Certificate-Key Pair",
+      "prefix": "ckp-",
+      "middle": "<fqdn>",
+      "suffix": "-<protocol>",
+      "example": "ckp-citrix.contoso.com-ssl",
+      "notes": "NetScaler object referencing certificate and key; protocol usually ssl."
+    }
+  },
+  "service_groups_monitors": {
+    "section_name_readable": "Service Groups / Services / Monitors",
+    "service_group": {
+      "object_name_readable": "Service Group",
+      "prefix": "sg-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<protocol>",
+      "example": "sg-citrix.contoso.com-ssl",
+      "notes": "Groups backend servers for a service. UDP groups use leading u before port, e.g., -u123; see Global Notes for optional datacenter tag."
+    },
+    "monitor": {
+      "object_name_readable": "Monitor",
+      "prefix": "mon-",
+      "middle": "<type>-<service or FQDN>",
+      "suffix": "",
+      "example": "mon-https-citrix.contoso.com",
+      "notes": "Monitor type = http, https, tcp, etc."
+    },
+    "service": {
+      "object_name_readable": "Service",
+      "prefix": "svc-",
+      "middle": "<server>-<service>",
+      "suffix": "-<protocol>",
+      "example": "svc-srv1-citrix-ssl",
+      "notes": "Used when not using service groups; references a single backend server; see Global Notes for optional datacenter tag."
+    }
+  },
+  "global_server_load_balancing_gslb": {
+    "section_name_readable": "Global Server Load Balancing (GSLB)",
+    "gslb_vserver": {
+      "object_name_readable": "GSLB vServer",
+      "prefix": "gslb-vs-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<protocol>",
+      "example": "gslb-vs-citrix.contoso.com-ssl",
+      "notes": "Mirrors LB/CS naming; front-end GSLB endpoint; see Global Notes for optional datacenter tag."
+    },
+    "gslb_service": {
+      "object_name_readable": "GSLB Service",
+      "prefix": "gslb-svc-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<protocol>",
+      "example": "gslb-svc-citrix.contoso.com-ssl",
+      "notes": "Represents a backend service at a GSLB site; see Global Notes for optional datacenter tag."
+    },
+    "gslb_monitor": {
+      "object_name_readable": "GSLB Monitor",
+      "prefix": "gslb-mon-",
+      "middle": "<type>-<service or FQDN>",
+      "suffix": "",
+      "example": "gslb-mon-https-citrix.contoso.com",
+      "notes": "Monitor type = http, https, tcp, etc."
+    },
+    "gslb_site": {
+      "object_name_readable": "GSLB Site",
+      "prefix": "gslb-site-",
+      "middle": "<site-name>",
+      "suffix": "",
+      "example": "gslb-site-bl",
+      "notes": "Short site names, e.g., bl (East Beltline), bc (Barden Court)."
+    },
+    "gslb_site_link": {
+      "object_name_readable": "GSLB Site Link",
+      "prefix": "gslb-sitelink-",
+      "middle": "<site1>-<site2>",
+      "suffix": "",
+      "example": "gslb-sitelink-bl-bc",
+      "notes": "Indicates MEP connectivity between two sites."
+    },
+    "gslb_domain": {
+      "object_name_readable": "GSLB Domain",
+      "prefix": "gslb-dom-",
+      "middle": "<domain-name>",
+      "suffix": "",
+      "example": "gslb-dom-contoso.com",
+      "notes": "GSLB domain used for DNS queries."
+    },
+    "gslb_persistence_group": {
+      "object_name_readable": "GSLB Persistence Group",
+      "prefix": "gslb-pg-",
+      "middle": "<group-name>",
+      "suffix": "",
+      "example": "gslb-pg-citrix",
+      "notes": "Defines persistence (stickiness) behavior across GSLB sites."
+    },
+    "gslb_parameter_set": {
+      "object_name_readable": "GSLB Parameter Set",
+      "prefix": "gslb-ps-",
+      "middle": "<parameter-set-name>",
+      "suffix": "",
+      "example": "gslb-ps-default",
+      "notes": "Controls global GSLB behavior and defaults."
+    },
+    "gslb_policy": {
+      "object_name_readable": "GSLB Policy",
+      "prefix": "gslb-pol-",
+      "middle": "<policy-name>",
+      "suffix": "",
+      "example": "gslb-pol-weighted",
+      "notes": "Defines GSLB decision logic (weighted, RTT, proximity, etc.)."
+    },
+    "gslb_policy_label": {
+      "object_name_readable": "GSLB Policy Label",
+      "prefix": "gslb-pl-",
+      "middle": "<label-function>",
+      "suffix": "",
+      "example": "gslb-pl-citrix-pre-checks",
+      "notes": "Used to chain or group GSLB policies. **Include the function** (e.g., pre-checks, failover) for flow clarity."
+    }
+  },
+  "authoritative_dns_adns": {
+    "section_name_readable": "Authoritative DNS (ADNS)",
+    "dns_vserver": {
+      "object_name_readable": "DNS vServer",
+      "prefix": "dns-vs-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<port>",
+      "example": "dns-vs-dns.contoso.com-53",
+      "notes": "Authoritative DNS vServer; always append port (53 for UDP/TCP)."
+    },
+    "dns_service": {
+      "object_name_readable": "DNS Service",
+      "prefix": "dns-svc-",
+      "middle": "<service or FQDN>",
+      "suffix": "-<port>",
+      "example": "dns-svc-dns.bl.contoso.com-53",
+      "notes": "Backend DNS service on a specific node; include port to distinguish UDP/TCP if needed."
+    },
+    "dns_policy": {
+      "object_name_readable": "DNS Policy",
+      "prefix": "dns-pol-",
+      "middle": "<match-logic>",
+      "suffix": "",
+      "example": "dns-pol-zone-contoso.com",
+      "notes": "Defines when to apply particular DNS behavior or view; match logic usually zone or query type."
+    },
+    "dns_monitor": {
+      "object_name_readable": "DNS Monitor",
+      "prefix": "dns-mon-",
+      "middle": "<type>-<service or FQDN>",
+      "suffix": "",
+      "example": "dns-mon-udp-dns.contoso.com",
+      "notes": "Health monitoring for DNS backends; type usually udp or tcp."
+    },
+    "dns_zone_file": {
+      "object_name_readable": "DNS Zone File",
+      "prefix": "dns-zone-",
+      "middle": "<zone-name>",
+      "suffix": "",
+      "example": "dns-zone-contoso.com",
+      "notes": "Represents a zone; zone names should be lowercase. Dots allowed only as part of the FQDN."
+    },
+    "dns_parameter_set": {
+      "object_name_readable": "DNS Parameter Set",
+      "prefix": "dns-ps-",
+      "middle": "<parameter-set-name>",
+      "suffix": "",
+      "example": "dns-ps-default",
+      "notes": "DNS-wide settings like default TTLs; align with GSLB and site logic. Always append port/protocol on vServers/Services to clearly identify transport."
+    }
+  },
+  "policy_logic_components": {
+    "section_name_readable": "Policy Logic Components",
+    "named_expression_pattern_set": {
+      "object_name_readable": "Named Expression / Pattern Set",
+      "prefix": "exp-",
+      "middle": "<purpose or condition>",
+      "suffix": "",
+      "example": "exp-url-admin-portal",
+      "notes": "Reusable pattern used in policies for hostname, URL, or header matching."
+    },
+    "string_map": {
+      "object_name_readable": "String Map",
+      "prefix": "str-map-",
+      "middle": "<data-set-purpose>",
+      "suffix": "",
+      "example": "str-map-blocked-agents",
+      "notes": "Used to define key/value pairs or lists for policy comparisons (e.g., bot lists, URL aliases)."
+    },
+    "policy_dataset": {
+      "object_name_readable": "Policy Dataset",
+      "prefix": "ds_",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "ds_smtp_trusted_clients",
+      "notes": "Used for lists of IPs (IPv4/IPv6), integers, or strings referenced in policies. **Use underscores (_) as separators; hyphens are not allowed.**"
+    }
+  },
+  "responder": {
+    "section_name_readable": "Responder",
+    "responder_action": {
+      "object_name_readable": "Responder Action",
+      "prefix": "rs-act-",
+      "middle": "<purpose or fqdn>",
+      "suffix": "-<type>",
+      "example": "rs-act-citrix.contoso.com-redirect",
+      "notes": "Defines responder behavior: redirect, respond, drop, etc."
+    },
+    "responder_policy": {
+      "object_name_readable": "Responder Policy",
+      "prefix": "rs-pol-",
+      "middle": "<match-logic>",
+      "suffix": "",
+      "example": "rs-pol-redirect-https",
+      "notes": "Matching condition (e.g., http to https) that triggers responder action."
+    },
+    "responder_policy_label": {
+      "object_name_readable": "Responder Policy Label",
+      "prefix": "rs-pl-",
+      "middle": "<grouping-function>",
+      "suffix": "",
+      "example": "rs-pl-citrix-redirects",
+      "notes": "Groups related responder policies. **Include the function** (e.g., redirects, security) for flow clarity."
+    }
+  },
+  "rewrite": {
+    "section_name_readable": "Rewrite",
+    "rewrite_action": {
+      "object_name_readable": "Rewrite Action",
+      "prefix": "rw-act-",
+      "middle": "<purpose or fqdn>",
+      "suffix": "-<scope>",
+      "example": "rw-act-studio.test.contoso.com-url",
+      "notes": "Scope identifies what is rewritten (url, header, body, cookie)."
+    },
+    "rewrite_policy": {
+      "object_name_readable": "Rewrite Policy",
+      "prefix": "rw-pol-",
+      "middle": "<[matchtype-]service>",
+      "suffix": "-<target-vserver>",
+      "example": "rw-pol-host-studio-lb-vs-studio.test.contoso.com-ssl",
+      "notes": "matchtype is optional (host, path, hostpath, header, cookie, query, method). target-vserver uses existing CS/LB naming."
+    },
+    "rewrite_policy_label": {
+      "object_name_readable": "Rewrite Policy Label",
+      "prefix": "rw-pl-",
+      "middle": "<service-function>",
+      "suffix": "",
+      "example": "rw-pl-studio-client-side",
+      "notes": "Groups rewrite policies. **Include the function** (e.g., client-side, header-injection) for flow clarity."
+    }
+  },
+  "authentication_aaa_gateway": {
+    "section_name_readable": "Authentication / AAA / Gateway",
+    "authentication_vserver": {
+      "object_name_readable": "Authentication vServer",
+      "prefix": "auth-vs-",
+      "middle": "<service or fqdn>",
+      "suffix": "-<protocol>",
+      "example": "auth-vs-entra-sso-ssl",
+      "notes": "Dedicated AAA/authentication vServers; usually ssl."
+    },
+    "authentication_server": {
+      "object_name_readable": "Authentication Server",
+      "prefix": "auth-srv-",
+      "middle": "<type>-<system-name>",
+      "suffix": "",
+      "example": "auth-srv-ldap-ad-primary",
+      "notes": "Connection object for a backend authentication system (e.g., LDAP, RADIUS, SAML IDP)."
+    },
+    "authentication_policy": {
+      "object_name_readable": "Authentication Policy",
+      "prefix": "auth-pol-",
+      "middle": "<method>-<service>",
+      "suffix": "",
+      "example": "auth-pol-ldap-ad",
+      "notes": "method = ldap, radius, saml, oidc, cert, etc."
+    },
+    "authentication_policy_label": {
+      "object_name_readable": "Authentication Policy Label",
+      "prefix": "auth-pl-",
+      "middle": "<flow-or-service-function>",
+      "suffix": "",
+      "example": "auth-pl-web-saml-flow",
+      "notes": "Used to chain multiple authentication policies into a flow. **Include the flow/function** (e.g., saml-flow, primary-mfa) for clarity."
+    },
+    "authentication_profile": {
+      "object_name_readable": "Authentication Profile",
+      "prefix": "auth-prof-",
+      "middle": "<service or idp>",
+      "suffix": "-<protocol>",
+      "example": "auth-prof-entra-oidc",
+      "notes": "Profiles for SAML/OIDC/JWT; protocol typically saml or oidc."
+    },
+    "gateway_vserver": {
+      "object_name_readable": "Gateway vServer",
+      "prefix": "gw-vs-",
+      "middle": "<service or fqdn>",
+      "suffix": "-<protocol>",
+      "example": "gw-vs-gateway.test.contoso.com-ssl",
+      "notes": "Gateway/AAA endpoint used for ICA Proxy or VPN; see Global Notes for optional datacenter tag."
+    },
+    "session_policy": {
+      "object_name_readable": "Session Policy",
+      "prefix": "sess-pol-",
+      "middle": "<purpose-or-service>",
+      "suffix": "",
+      "example": "sess-pol-ica-proxy",
+      "notes": "Defines session-level behavior (ICA-only vs full VPN)."
+    },
+    "session_profile": {
+      "object_name_readable": "Session Profile",
+      "prefix": "sess-prof-",
+      "middle": "<service>",
+      "suffix": "",
+      "example": "sess-prof-citrix",
+      "notes": "Session profile used by its corresponding session policy."
+    },
+    "traffic_policy": {
+      "object_name_readable": "Traffic Policy",
+      "prefix": "tp-pol-",
+      "middle": "<purpose-or-service>",
+      "suffix": "",
+      "example": "tp-pol-citrix-edt",
+      "notes": "Advanced traffic steering (e.g., EDT vs TCP)."
+    },
+    "traffic_profile": {
+      "object_name_readable": "Traffic Profile",
+      "prefix": "tp-prof-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "tp-prof-edt-optim",
+      "notes": "Profile applied via traffic policy for specific behavior."
+    },
+    "login_schema": {
+      "object_name_readable": "Login Schema",
+      "prefix": "login-sch-",
+      "middle": "<flow or form>",
+      "suffix": "",
+      "example": "login-sch-username-password",
+      "notes": "Used for AAA login pages and custom forms."
+    },
+    "jwt_oauth_key": {
+      "object_name_readable": "JWT/OAuth Key",
+      "prefix": "jwt-key-",
+      "middle": "<service>",
+      "suffix": "",
+      "example": "jwt-key-entra",
+      "notes": "Keys used for JWT/OIDC validation or signing."
+    }
+  },
+  "security_waf_bot_ratelimiting": {
+    "section_name_readable": "Security / WAF / Bot / DoS / Rate Limiting",
+    "waf_profile": {
+      "object_name_readable": "WAF Profile",
+      "prefix": "waf-prof-",
+      "middle": "<app or service>",
+      "suffix": "",
+      "example": "waf-prof-citrix",
+      "notes": "Defines WAF settings for a particular application."
+    },
+    "waf_policy": {
+      "object_name_readable": "WAF Policy",
+      "prefix": "waf-pol-",
+      "middle": "<match-logic>",
+      "suffix": "",
+      "example": "waf-pol-host-citrix.test.contoso.com",
+      "notes": "Host/path-based WAF policy match conditions."
+    },
+    "waf_policy_label": {
+      "object_name_readable": "WAF Policy Label",
+      "prefix": "waf-pl-",
+      "middle": "<grouping-function>",
+      "suffix": "",
+      "example": "waf-pl-citrix-pre-auth",
+      "notes": "Groups related WAF policies for chaining. **Include the function** (e.g., pre-auth, session-checks) for flow clarity."
+    },
+    "bot_profile": {
+      "object_name_readable": "Bot Profile",
+      "prefix": "bot-prof-",
+      "middle": "<app or service>",
+      "suffix": "",
+      "example": "bot-prof-public-api",
+      "notes": "Bot management behavior for a specific application."
+    },
+    "bot_policy": {
+      "object_name_readable": "Bot Policy",
+      "prefix": "bot-pol-",
+      "middle": "<match-logic>",
+      "suffix": "",
+      "example": "bot-pol-public-api",
+      "notes": "When/where to apply bot protection."
+    },
+    "dos_rate_limit_policy": {
+      "object_name_readable": "DoS / Rate Limit Policy",
+      "prefix": "rl-pol-",
+      "middle": "<service-or-scope>",
+      "suffix": "",
+      "example": "rl-pol-login-protection",
+      "notes": "Rate limiting or DoS protection for critical endpoints like logins or APIs."
+    },
+    "ip_set": {
+      "object_name_readable": "IP Set",
+      "prefix": "ipset-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "ipset-mon-tcp-ecv-smtp.contoso.com",
+      "notes": "Used for NetScaler-owned IP lists (like source IPs). **Highly recommended to use the target object name in the middle to enforce one-to-one mapping.**"
+    },
+    "url_filter_policy": {
+      "object_name_readable": "URL Filter Policy",
+      "prefix": "urlf-pol-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "urlf-pol-admin-portal",
+      "notes": "URL filtering policies; scope typically an app/area."
+    }
+  },
+  "advanced_traffic_policies": {
+    "section_name_readable": "Advanced Traffic Policies",
+    "http_callout": {
+      "object_name_readable": "HTTP Callout",
+      "prefix": "httpco-",
+      "middle": "<purpose-or-service>",
+      "suffix": "",
+      "example": "httpco-authz-lookup",
+      "notes": "Defines an external HTTP call for decisions (auth, headers, etc.)."
+    },
+    "http_callout_policy": {
+      "object_name_readable": "HTTP Callout Policy",
+      "prefix": "co-pol-",
+      "middle": "<purpose-or-service>",
+      "suffix": "",
+      "example": "co-pol-authz-lookup",
+      "notes": "Policy that triggers the HTTP callout in traffic flow."
+    },
+    "cache_policy": {
+      "object_name_readable": "Cache Policy",
+      "prefix": "cache-pol-",
+      "middle": "<service-or-scope>",
+      "suffix": "",
+      "example": "cache-pol-public-content",
+      "notes": "Controls Integrated Caching behavior per app/scope."
+    },
+    "cache_profile": {
+      "object_name_readable": "Cache Profile",
+      "prefix": "cache-prof-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "cache-prof-default",
+      "notes": "TTL, size, and cache behavior defaults."
+    },
+    "compression_policy": {
+      "object_name_readable": "Compression Policy",
+      "prefix": "cmp-pol-",
+      "middle": "<service-or-scope>",
+      "suffix": "",
+      "example": "cmp-pol-citrix-web",
+      "notes": "Determines which traffic/content gets compressed."
+    },
+    "compression_profile": {
+      "object_name_readable": "Compression Profile",
+      "prefix": "cmp-prof-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "cmp-prof-default",
+      "notes": "Compression tuning (algorithms, thresholds, etc.)."
+    },
+    "qos_policy": {
+      "object_name_readable": "QoS Policy",
+      "prefix": "qos-pol-",
+      "middle": "<service-or-traffic>",
+      "suffix": "",
+      "example": "qos-pol-hdx-priority",
+      "notes": "Used to prioritize specific traffic types (e.g., HDX)."
+    },
+    "spillover_policy": {
+      "object_name_readable": "Spillover Policy",
+      "prefix": "so-pol-",
+      "middle": "<service>",
+      "suffix": "",
+      "example": "so-pol-citrix-backend",
+      "notes": "Defines conditions to spill traffic to a backup vServer."
+    }
+  },
+  "gateway_ica_citrix_specific": {
+    "section_name_readable": "Gateway / ICA / Citrix-Specific",
+    "sta_server": {
+      "object_name_readable": "STA Server",
+      "prefix": "sta-srv-",
+      "middle": "<hostname-or-site>",
+      "suffix": "",
+      "example": "sta-srv-bc-xdc01",
+      "notes": "Secure Ticket Authority server for ICA Proxy."
+    },
+    "citrix_gateway_vserver": {
+      "object_name_readable": "Citrix Gateway vServer",
+      "prefix": "gw-vs-",
+      "middle": "<fqdn>",
+      "suffix": "-<protocol>",
+      "example": "gw-vs-gateway.test.contoso.com-ssl",
+      "notes": "Gateway used for ICA Proxy, VPN, etc.; reuses gw-vs- convention."
+    },
+    "ica_traffic_policy": {
+      "object_name_readable": "ICA Traffic Policy",
+      "prefix": "ica-pol-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "ica-pol-session-timeout",
+      "notes": "Controls HDX/ICA-specific behavior such as timeouts or EDT usage."
+    },
+    "ica_traffic_profile": {
+      "object_name_readable": "ICA Traffic Profile",
+      "prefix": "ica-prof-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "ica-prof-default",
+      "notes": "Profile applied via ICA traffic policies."
+    },
+    "epa_policy": {
+      "object_name_readable": "EPA Policy",
+      "prefix": "epa-pol-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "epa-pol-corp-laptops",
+      "notes": "Endpoint Analysis policy for posture checks."
+    },
+    "epa_profile": {
+      "object_name_readable": "EPA Profile",
+      "prefix": "epa-prof-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "epa-prof-vpn-access",
+      "notes": "EPA configuration profile paired with EPA policies."
+    }
+  },
+  "network_infrastructure": {
+    "section_name_readable": "Network / Infrastructure",
+    "vlan": {
+      "object_name_readable": "VLAN",
+      "prefix": "vlan-",
+      "middle": "<id>",
+      "suffix": "",
+      "example": "vlan-110",
+      "notes": "Logical VLAN; name equals VLAN ID."
+    },
+    "link_aggregation": {
+      "object_name_readable": "Link Aggregation",
+      "prefix": "lag-",
+      "middle": "<id>",
+      "suffix": "",
+      "example": "lag-1",
+      "notes": "Represents a link aggregation group (e.g., LA/1)."
+    },
+    "route_monitor": {
+      "object_name_readable": "Route Monitor",
+      "prefix": "rtmon-",
+      "middle": "<target-or-purpose>",
+      "suffix": "",
+      "example": "rtmon-default-gateway",
+      "notes": "Monitors next-hop reachability for static routes."
+    },
+    "route_group": {
+      "object_name_readable": "Route Group",
+      "prefix": "route-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "route-backend-subnets",
+      "notes": "Logical grouping for related routes (for documentation/scripts)."
+    },
+    "intranet_ip_pool": {
+      "object_name_readable": "Intranet IP Pool",
+      "prefix": "ip-pool-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "ip-pool-vpn-users",
+      "notes": "Address pool for VPN clients."
+    },
+    "traffic_domain": {
+      "object_name_readable": "Traffic Domain",
+      "prefix": "td-",
+      "middle": "<id-or-scope>",
+      "suffix": "",
+      "example": "td-10-hdx",
+      "notes": "Used for multi-tenant or segmented traffic separation."
+    },
+    "net_profile": {
+      "object_name_readable": "Net Profile",
+      "prefix": "net-prof-",
+      "middle": "<target-object-name>",
+      "suffix": "",
+      "example": "net-prof-mon-tcp-ecv-smtp.contoso.com",
+      "notes": "Defines source IP (VIP, SNIP, etc.) for traffic initiated by the NetScaler, such as monitor probes or AAA flows. **Highly recommended to use the target object name in the middle to enforce one-to-one mapping.**"
+    }
+  },
+  "observability_logging_analytics": {
+    "section_name_readable": "Observability / Logging / Analytics",
+    "syslog_action": {
+      "object_name_readable": "Syslog Action",
+      "prefix": "log-act-",
+      "middle": "<target-or-purpose>",
+      "suffix": "",
+      "example": "log-act-splunk-core",
+      "notes": "Defines how and where syslog is sent."
+    },
+    "syslog_policy": {
+      "object_name_readable": "Syslog Policy",
+      "prefix": "log-pol-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "log-pol-hdx-access",
+      "notes": "Determines which traffic/events are logged."
+    },
+    "syslog_server": {
+      "object_name_readable": "Syslog Server",
+      "prefix": "log-srv-",
+      "middle": "<name>",
+      "suffix": "",
+      "example": "log-srv-splunk1",
+      "notes": "Named syslog destination."
+    },
+    "snmp_manager_trap_destination": {
+      "object_name_readable": "SNMP Manager (Trap Destination)",
+      "prefix": "snmp-mgr-",
+      "middle": "<tool or hostname>",
+      "suffix": "",
+      "example": "snmp-mgr-datacenter-monitor",
+      "notes": "Identifies the destination server receiving SNMP traps from the NetScaler."
+    },
+    "snmp_user_snmpv3": {
+      "object_name_readable": "SNMP User (SNMPv3)",
+      "prefix": "snmp-user-",
+      "middle": "<tool or system>",
+      "suffix": "",
+      "example": "snmp-user-monitoring-tool",
+      "notes": "Identifies the specific user credentials (for SNMPv3) used by a monitoring system."
+    },
+    "appflow_action": {
+      "object_name_readable": "AppFlow Action",
+      "prefix": "af-act-",
+      "middle": "<purpose>",
+      "suffix": "",
+      "example": "af-act-hdx-insight",
+      "notes": "Defines what AppFlow data is exported."
+    },
+    "appflow_collector": {
+      "object_name_readable": "AppFlow Collector",
+      "prefix": "af-coll-",
+      "middle": "<target>",
+      "suffix": "",
+      "example": "af-coll-netscaler-console",
+      "notes": "AppFlow destination (e.g., NetScaler Console)."
+    },
+    "analytics_profile": {
+      "object_name_readable": "Analytics Profile",
+      "prefix": "ana-prof-",
+      "middle": "<scope>",
+      "suffix": "",
+      "example": "ana-prof-citrix",
+      "notes": "Profile for Web/HDX Insight and analytics behavior."
+    },
+    "ntp_server": {
+      "object_name_readable": "NTP Server",
+      "prefix": "ntp-srv-",
+      "middle": "<name>",
+      "suffix": "",
+      "example": "ntp-srv-core1",
+      "notes": "Logical name for time source; configured by IP or FQDN underneath."
+    }
+  }
+}

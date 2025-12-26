@@ -46,9 +46,9 @@ param(
   [ValidateNotNullOrEmpty()]
   [string[]]$ConfigFiles,
 
-  [Parameter(Mandatory=$true)]
+  [Parameter(Mandatory=$false)]
   [ValidateNotNullOrEmpty()]
-  [string]$OutDir,
+  [string]$OutDir = $(Join-Path -Path $psScriptRoot -ChildPath "Reports"),
 
   [ValidateSet('dot','svg','png')]
   [string]$GraphFormat = 'dot',
