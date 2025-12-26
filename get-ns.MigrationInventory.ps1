@@ -386,41 +386,50 @@ function Parse-NsConfigFile {
 
     # CS vServer binds CS policy
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-vserver->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
     # CS vServer binds policyLabel
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyLabel\s+(?<pl>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $labelName = $Matches['pl']
+      if (-not $vsName -or -not $labelName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pl; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$labelName; Priority=$priority
         BindType="cs-vserver->cs-policylabel"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
       continue
     }
 
     # CS policyLabel binds CS policy
     if ($l -match '^\s*bind\s+cs\s+policylabel\s+(?<pl>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $labelName = $Matches['pl']
+      $polName = $Matches['pol']
+      if (-not $labelName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS Policy Label"; TargetName=$Matches.pl
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS Policy Label"; TargetName=$labelName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-policylabel->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
@@ -518,26 +527,32 @@ function Parse-NsConfigFile {
 
     # rewrite bound to CS/LB vServer (type=REQUEST/RESPONSE)
     if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+(?<rtype>REQUEST|RESPONSE)\b(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
-        Feature="Rewrite"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType=$t; TargetName=$vsName
+        Feature="Rewrite"; PolicyName=$polName; Priority=$priority
         BindType=("rewrite-{0}->policy" -f $Matches.rtype.ToLower()); Extra=$l
       }
-      Mark-Ref $m "UsedRewritePolicy" $Matches.pol
+      Mark-Ref $m "UsedRewritePolicy" $polName
       continue
     }
 
     # SSL vServer cert binding (best-effort)
     if ($l -match '^\s*bind\s+ssl\s+vserver\s+(?<vs>\S+)\s+-certkeyName\s+(?<ck>\S+)\b') {
+      $vsName = $Matches['vs']
+      $certName = $Matches['ck']
+      if (-not $vsName -or -not $certName) { continue }
       $m.Bindings += @{
-        TargetType="SSL vServer"; TargetName=$Matches.vs
-        Feature="SSL"; PolicyName=$Matches.ck; Priority=$null
+        TargetType="SSL vServer"; TargetName=$vsName
+        Feature="SSL"; PolicyName=$certName; Priority=$null
         BindType="ssl-vserver->certkey"; Extra=$l
       }
-      Mark-Ref $m "UsedCertKey" $Matches.ck
+      Mark-Ref $m "UsedCertKey" $certName
       continue
     }
   }
