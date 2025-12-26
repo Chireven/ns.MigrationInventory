@@ -802,10 +802,10 @@ function Get-BackendTable {
 function Get-StrayArtifacts {
   param([Parameter(Mandatory=$true)]$m)
 
-  $items = @()
+  $items = New-Object 'System.Collections.Generic.List[object]'
 
   function Add-Stray($type, $name, $reason) {
-    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+    $null = $items.Add([pscustomobject]@{ Type=$type; Name=$name; Reason=$reason })
   }
 
   # Defined but not used
