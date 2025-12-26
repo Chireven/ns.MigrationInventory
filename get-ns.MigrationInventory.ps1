@@ -386,41 +386,50 @@ function Parse-NsConfigFile {
 
     # CS vServer binds CS policy
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-vserver->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
     # CS vServer binds policyLabel
     if ($l -match '^\s*bind\s+cs\s+vserver\s+(?<vs>\S+)\s+-policyLabel\s+(?<pl>\S+)(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $labelName = $Matches['pl']
+      if (-not $vsName -or -not $labelName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS vServer"; TargetName=$Matches.vs
-        Feature="CS"; PolicyName=$Matches.pl; Priority=$priority
+        TargetType="CS vServer"; TargetName=$vsName
+        Feature="CS"; PolicyName=$labelName; Priority=$priority
         BindType="cs-vserver->cs-policylabel"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
       continue
     }
 
     # CS policyLabel binds CS policy
     if ($l -match '^\s*bind\s+cs\s+policylabel\s+(?<pl>\S+)\s+-policyName\s+(?<pol>\S+)(?<rest>.*)$') {
+      $labelName = $Matches['pl']
+      $polName = $Matches['pol']
+      if (-not $labelName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $m.Bindings += @{
-        TargetType="CS Policy Label"; TargetName=$Matches.pl
-        Feature="CS"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType="CS Policy Label"; TargetName=$labelName
+        Feature="CS"; PolicyName=$polName; Priority=$priority
         BindType="cs-policylabel->cs-policy"; Extra=$l
       }
-      Mark-Ref $m "UsedCsPolicyLabel" $Matches.pl
-      Mark-Ref $m "UsedCsPolicy" $Matches.pol
+      Mark-Ref $m "UsedCsPolicyLabel" $labelName
+      Mark-Ref $m "UsedCsPolicy" $polName
       continue
     }
 
@@ -485,17 +494,25 @@ function Parse-NsConfigFile {
       continue
     }
 
-    # responder bound to CS/LB vServer (type=RESPONSE)
-    if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+    # responder bound to vServer (type=RESPONSE)
+    if ($l -match '^\s*bind\s+(?<kind>\S+)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $kind = $Matches['kind']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $kind -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
-      $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $kindLabel = switch ($kind.ToLower()) {
+        "cs" { "CS vServer" }
+        "lb" { "LB vServer" }
+        default { "{0} vServer" -f $kind.ToUpper() }
+      }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
-        Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType=$kindLabel; TargetName=$vsName
+        Feature="Responder"; PolicyName=$polName; Priority=$priority
         BindType="responder->policy"; Extra=$l
       }
-      Mark-Ref $m "UsedResponderPolicy" $Matches.pol
+      Mark-Ref $m "UsedResponderPolicy" $polName
       continue
     }
 
@@ -514,26 +531,32 @@ function Parse-NsConfigFile {
 
     # rewrite bound to CS/LB vServer (type=REQUEST/RESPONSE)
     if ($l -match '^\s*bind\s+(?<kind>cs|lb)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+(?<rtype>REQUEST|RESPONSE)\b(?<rest>.*)$') {
+      $vsName = $Matches['vs']
+      $polName = $Matches['pol']
+      if (-not $vsName -or -not $polName) { continue }
       $priority = $null
-      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
       $t = if ($Matches.kind -eq "cs") { "CS vServer" } else { "LB vServer" }
       $m.Bindings += @{
-        TargetType=$t; TargetName=$Matches.vs
-        Feature="Rewrite"; PolicyName=$Matches.pol; Priority=$priority
+        TargetType=$t; TargetName=$vsName
+        Feature="Rewrite"; PolicyName=$polName; Priority=$priority
         BindType=("rewrite-{0}->policy" -f $Matches.rtype.ToLower()); Extra=$l
       }
-      Mark-Ref $m "UsedRewritePolicy" $Matches.pol
+      Mark-Ref $m "UsedRewritePolicy" $polName
       continue
     }
 
     # SSL vServer cert binding (best-effort)
     if ($l -match '^\s*bind\s+ssl\s+vserver\s+(?<vs>\S+)\s+-certkeyName\s+(?<ck>\S+)\b') {
+      $vsName = $Matches['vs']
+      $certName = $Matches['ck']
+      if (-not $vsName -or -not $certName) { continue }
       $m.Bindings += @{
-        TargetType="SSL vServer"; TargetName=$Matches.vs
-        Feature="SSL"; PolicyName=$Matches.ck; Priority=$null
+        TargetType="SSL vServer"; TargetName=$vsName
+        Feature="SSL"; PolicyName=$certName; Priority=$null
         BindType="ssl-vserver->certkey"; Extra=$l
       }
-      Mark-Ref $m "UsedCertKey" $Matches.ck
+      Mark-Ref $m "UsedCertKey" $certName
       continue
     }
   }
@@ -628,10 +651,10 @@ function Get-CsFlows {
       LbVip = $lbDetails.Vip
       LbPort = $lbDetails.Port
       LbProto = $lbDetails.Proto
-      LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-      LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-      LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-      LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+      LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+      LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+      LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+      LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
     }
   }
 
@@ -664,10 +687,10 @@ function Get-CsFlows {
         LbVip = $lbDetails.Vip
         LbPort = $lbDetails.Port
         LbProto = $lbDetails.Proto
-        LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-        LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-        LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-        LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+        LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+        LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+        LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+        LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
       }
     }
   }
@@ -802,10 +825,10 @@ function Get-BackendTable {
 function Get-StrayArtifacts {
   param([Parameter(Mandatory=$true)]$m)
 
-  $items = @()
+  $items = New-Object 'System.Collections.Generic.List[object]'
 
   function Add-Stray($type, $name, $reason) {
-    $script:items += [pscustomobject]@{ Type=$type; Name=$name; Reason=$reason }
+    $null = $items.Add([pscustomobject]@{ Type=$type; Name=$name; Reason=$reason })
   }
 
   # Defined but not used
@@ -1116,10 +1139,15 @@ foreach ($m in $models) {
   Ensure-Dir $dir
 
   $csFlows   = Get-CsFlows -m $m
+  if ($null -eq $csFlows) { $csFlows = @() }
   $respTable = Get-ResponderTable -m $m
+  if ($null -eq $respTable) { $respTable = @() }
   $rwTable   = Get-RewriteTable -m $m
+  if ($null -eq $rwTable) { $rwTable = @() }
   $backend   = Get-BackendTable -m $m
+  if ($null -eq $backend) { $backend = @() }
   $strays    = Get-StrayArtifacts -m $m
+  if ($null -eq $strays) { $strays = @() }
 
   $flowDot = Write-FlowDot -m $m -baseName $name -dir $dir -csFlows $csFlows
   $flowGraphic = $null
@@ -1186,10 +1214,15 @@ foreach ($p in $cm.RewritePolicy.Keys)   { if ($cm.Refs.UsedRewritePolicy.Contai
 
 $combinedName = "ALL"
 $csFlowsC   = Get-CsFlows -m $cm
+if ($null -eq $csFlowsC) { $csFlowsC = @() }
 $respTableC = Get-ResponderTable -m $cm
+if ($null -eq $respTableC) { $respTableC = @() }
 $rwTableC   = Get-RewriteTable -m $cm
+if ($null -eq $rwTableC) { $rwTableC = @() }
 $backendC   = Get-BackendTable -m $cm
+if ($null -eq $backendC) { $backendC = @() }
 $straysC    = Get-StrayArtifacts -m $cm
+if ($null -eq $straysC) { $straysC = @() }
 $flowDotC   = Write-FlowDot -m $cm -baseName $combinedName -dir $combinedDir -csFlows $csFlowsC
 $flowGraphicC = $null
 
