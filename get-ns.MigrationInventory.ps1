@@ -1187,11 +1187,10 @@ function Write-FlowDot {
 # ---------------------------
 function ConvertTo-ReportTable {
   param(
-    $Data,
+    [Parameter(Mandatory=$true)]$Data,
     [string]$Title,
     [string]$Id
   )
-  if ($null -eq $Data) { $Data = @() }
   $count = @($Data).Count
   if ($count -eq 0) {
     return "<div class=""empty-state"">No data available.</div>"
