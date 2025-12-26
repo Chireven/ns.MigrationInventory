@@ -1018,7 +1018,6 @@ function Write-EntryPointFlowDot {
 function Write-FullFlowDot {
   param(
     [Parameter(Mandatory=$true)]$m,
-    [Parameter(Mandatory=$true)]$entrypoint,
     [Parameter(Mandatory=$true)][string]$baseName,
     [Parameter(Mandatory=$true)][string]$dir,
     [Parameter(Mandatory=$true)]$csFlows
@@ -1131,28 +1130,41 @@ function Write-FullFlowDot {
   return $dotPath
 }
 
+function Write-FlowDot {
+  param(
+    [Parameter(Mandatory=$true)]$m,
+    [Parameter(Mandatory=$true)][string]$baseName,
+    [Parameter(Mandatory=$true)][string]$dir,
+    [Parameter(Mandatory=$true)]$csFlows
+  )
+
+  return Write-FullFlowDot -m $m -baseName $baseName -dir $dir -csFlows $csFlows
+}
+
 # ---------------------------
 # HTML report writer (migration-centric)
 # ---------------------------
 function Write-Report {
   param(
     [Parameter(Mandatory=$true)]$m,
-    [Parameter(Mandatory=$true)][string]$reportTitle,
+    [string]$reportTitle,
     [Parameter(Mandatory=$true)][string]$baseName,
-    [Parameter(Mandatory=$true)][string]$reportFileName,
+    [string]$reportFileName,
     [Parameter(Mandatory=$true)][string]$dir,
     [Parameter(Mandatory=$true)]$csFlows,
     [Parameter(Mandatory=$true)]$respTable,
     [Parameter(Mandatory=$true)]$rwTable,
     [Parameter(Mandatory=$true)]$backend,
     [Parameter(Mandatory=$true)]$strays,
-    [Parameter(Mandatory=$true)]$entrypoints,
-    [Parameter(Mandatory=$true)]$entrypointFlows,
+    $entrypoints,
+    $entrypointFlows,
     [string]$flowDot,
     [string]$flowGraphic
   )
 
   Ensure-Dir $dir
+  if (-not $reportTitle) { $reportTitle = $baseName }
+  if (-not $reportFileName) { $reportFileName = $baseName + ".html" }
   if ($null -eq $entrypoints) { $entrypoints = @() }
   if ($null -eq $entrypointFlows) { $entrypointFlows = @{} }
 
