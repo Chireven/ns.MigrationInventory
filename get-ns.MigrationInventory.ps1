@@ -647,10 +647,10 @@ function Get-CsFlows {
       LbVip = $lbDetails.Vip
       LbPort = $lbDetails.Port
       LbProto = $lbDetails.Proto
-      LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-      LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-      LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-      LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+      LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+      LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+      LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+      LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
     }
   }
 
@@ -683,10 +683,10 @@ function Get-CsFlows {
         LbVip = $lbDetails.Vip
         LbPort = $lbDetails.Port
         LbProto = $lbDetails.Proto
-        LbBackends = if ($lbDetails.Backends.Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
-        LbBackendDetails = if ($lbDetails.BackendDetails.Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
-        LbServiceGroupMembers = if ($lbDetails.Members.Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
-        LbServiceGroupMonitors = if ($lbDetails.Monitors.Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
+        LbBackends = if (@($lbDetails.Backends).Count -gt 0) { $lbDetails.Backends -join ", " } else { "" }
+        LbBackendDetails = if (@($lbDetails.BackendDetails).Count -gt 0) { $lbDetails.BackendDetails -join "; " } else { "" }
+        LbServiceGroupMembers = if (@($lbDetails.Members).Count -gt 0) { $lbDetails.Members -join ", " } else { "" }
+        LbServiceGroupMonitors = if (@($lbDetails.Monitors).Count -gt 0) { $lbDetails.Monitors -join ", " } else { "" }
       }
     }
   }
