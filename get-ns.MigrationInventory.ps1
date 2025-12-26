@@ -487,20 +487,16 @@ function Parse-NsConfigFile {
 
     # responder bound to vServer (type=RESPONSE)
     if ($l -match '^\s*bind\s+(?<kind>\S+)\s+vserver\s+(?<vs>\S+)\s+-policyName\s+(?<pol>\S+).*-type\s+RESPONSE\b(?<rest>.*)$') {
-      $vsName = $Matches['vs']
-      $kind = $Matches['kind']
-      $polName = $Matches['pol']
-      if (-not $vsName -or -not $kind -or -not $polName) { continue }
       $priority = $null
-      if ($Matches['rest'] -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
-      $kindLabel = switch ($kind.ToLower()) {
+      if ($Matches.rest -match '-priority\s+(?<p>\d+)') { $priority = [int]$Matches.p }
+      $kindLabel = switch ($Matches.kind.ToLower()) {
         "cs" { "CS vServer" }
         "lb" { "LB vServer" }
-        default { "{0} vServer" -f $kind.ToUpper() }
+        default { "{0} vServer" -f $Matches.kind.ToUpper() }
       }
       $m.Bindings += @{
-        TargetType=$kindLabel; TargetName=$vsName
-        Feature="Responder"; PolicyName=$polName; Priority=$priority
+        TargetType=$kindLabel; TargetName=$Matches.vs
+        Feature="Responder"; PolicyName=$Matches.pol; Priority=$priority
         BindType="responder->policy"; Extra=$l
       }
       Mark-Ref $m "UsedResponderPolicy" $polName
